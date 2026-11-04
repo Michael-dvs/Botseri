@@ -1,4 +1,4 @@
-# ARCHITECTURE.md — Botseri
+# ARCHITECTURE.md : Botseri
 
 > **Versi:** 2.0 (Draft) · **Tanggal:** 19 Oktober 2026 · **Pemilik:** Moxikeru
 > **Turunan dari:** `BRD-Botseri.md` v1.0
@@ -26,7 +26,7 @@
 
 ### 0.2 Invarian Sistem
 
-Invarian berikut berlaku di seluruh kode. Pelanggaran dianggap bug.
+Invarian berikut berlaku di seluruh kode (definisi kanonik lengkap dapat dilihat pada [`docs/INVARIANTS.md`](./INVARIANTS.md)). Pelanggaran dianggap bug.
 
 | ID | Invarian |
 |---|---|
@@ -36,13 +36,16 @@ Invarian berikut berlaku di seluruh kode. Pelanggaran dianggap bug.
 | INV-04 | Setiap job terjadwal bersifat idempoten melalui mekanisme *claim* atomik (bagian 11). |
 | INV-05 | Semua timestamp disimpan `timestamptz` (UTC). Konversi ke tanggal/waktu lokal hanya lewat modul `lib/time` dengan zona waktu dari `bot_settings.timezone`. |
 | INV-06 | Workflow n8n tidak memuat aturan bisnis (ambang evaluasi, prioritas, jadwal). n8n hanya mengorkestrasi, memanggil LLM, dan mengirim pesan. |
-| INV-07 | Pengirim nomor non-whitelist diklasifikasikan sebagai Pelanggan dan hanya menjangkau state machine customer deterministik (`POST /api/internal/customer/handle`), tidak pernah menjangkau tool internal atau prompt agen operasional. |
+| INV-07 | Pengirim nomor non-whitelist hanya diproses oleh jalur pelanggan (`POST /api/internal/customer/handle`) bila `allow_unregistered_customers = true`, dan TIDAK PERNAH menjangkau agen owner (tool internal) atau konteks owner. |
 | INV-08 | Rute `/api/internal/*` MUST NOT dapat dijangkau dari internet. |
 | INV-09 | Input dari LLM ke tool adalah input tak tepercaya. Setiap endpoint tool memvalidasi dengan skema (zod) dan bersifat idempoten. |
 | INV-10 | Semua pesan proaktif (brief, reminder, evaluasi) lahir dari catatan `daily_execution_logs`, tidak pernah dari workflow yang mengirim secara bebas. |
 | INV-11 | Bahasa keluaran ke pengguna adalah Bahasa Indonesia. |
 | INV-12 | Perubahan skema hanya lewat migrasi Prisma maju (*forward-only*). Tidak ada perubahan manual pada database. |
-
+| INV-13 | Seluruh pengiriman pesan keluar WAHA wajib via `POST /api/internal/waha/send` dengan trigger sah yang terdaftar di `dashboard/src/lib/waha/triggers.ts`. |
+| INV-14 | Teks dari pelanggan adalah data tidak tepercaya (untrusted data). Dilarang diperlakukan sebagai instruksi atau dieksekusi sebagai perintah. |
+| INV-15 | Aksi destruktif (DELETE, CANCEL) atau aksi massal (ALL, SEMUA) pada data wajib melalui konfirmasi dua langkah deterministik di sisi server. |
+| INV-16 | Graf pipeline alur kerja yang disimpan ke database harus lolos validasi server (acyclic, singleton trigger, dan handle valid). |
 ### 0.3 Perubahan terhadap Draf Sebelumnya
 
 Draf pertama memuat beberapa hal yang saling bertentangan atau belum terdefinisi. Perubahan berikut sudah diputuskan di dokumen ini.
@@ -677,7 +680,7 @@ Langkah, berurutan:
 [Pesan WA masuk] → n8n → POST /inbound/accept
    ├─ accept=false → STOP (tanpa balasan)
    └─ accept=true
-        ├─ role=OWNER    → jalur lama (To-Do / Schedule / Briefing) — TIDAK BERUBAH
+        ├─ role=OWNER    → jalur lama (To-Do / Schedule / Briefing) (TIDAK BERUBAH)
         └─ role=CUSTOMER → POST /customer/handle → replies[] → n8n kirim satu per satu
                               │
             state machine: INIT → AWAITING_CHOICE → {AWAITING_ORDER | PAUSED_FOR_OWNER}

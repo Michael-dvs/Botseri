@@ -82,7 +82,22 @@ for file in "${FILES[@]}"; do
   if grep -E -q 'Bearer [A-Za-z0-9+/=_-]{20,}' "$file"; then
     log_violation "$rel_file" "INV-02" "ditemukan literal Bearer token (potensi kebocoran secret Authorization header)"
   fi
+
+  # 6. INV-13: Kontrak trigger_type outbound wajib terdaftar di OUTBOUND_TRIGGERS
+  if command -v node >/dev/null 2>&1 && [ -f "$REPO_ROOT/scripts/validate-workflow-contracts.mjs" ]; then
+    if ! node "$REPO_ROOT/scripts/validate-workflow-contracts.mjs" "$file" >/dev/null 2>&1; then
+      log_violation "$rel_file" "INV-13" "ditemukan trigger_type yang tidak terdaftar di OUTBOUND_TRIGGERS"
+    fi
+  fi
 done
+
+# Validasi fixture negatif terisolasi untuk memastikan validator menolak trigger tak dikenal
+if command -v node >/dev/null 2>&1 && [ -f "$REPO_ROOT/scripts/validate-workflow-contracts.mjs" ]; then
+  if ! node "$REPO_ROOT/scripts/validate-workflow-contracts.mjs" --test-negative >/dev/null 2>&1; then
+    echo "Error: Uji fixture negatif validator kontrak gagal." >&2
+    exit 1
+  fi
+fi
 
 if [ "$FAILURES" -gt 0 ]; then
   echo "Validasi workflow gagal: ditemukan $FAILURES pelanggaran." >&2

@@ -112,7 +112,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ chat_id: $json.target_chat_id || $json.chat_id, body: $json.body || $json.fallback_text, trigger_type: 'WORK_HOURS_REMINDER', idempotency_key: $json.job_id }) }}",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.target_chat_id || $json.chat_id, body: $json.body || $json.fallback_text, trigger_type: 'TASK_ALARM', idempotency_key: $json.job_id }) }}",
         "options": { "timeout": 30000 }
       },
       "credentials": {

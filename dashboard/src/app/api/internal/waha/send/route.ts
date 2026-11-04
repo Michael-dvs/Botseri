@@ -7,24 +7,13 @@ import { authorizeInternal } from "@/lib/internal/auth";
 import { log } from "@/lib/logger";
 import { HumanizerError, sendHumanizedMessage } from "@/lib/waha/humanizer";
 import { validateAgentOutput, FALLBACK_INVALID_REPLY } from "@/lib/waha/guard";
-
-const triggers = [
-  "CHAT_MASUK",
-  "MORNING_BRIEF",
-  "WORK_HOURS_REMINDER",
-  "END_OF_DAY_EVAL",
-  "PAIRING",
-  "TASK_ALARM",
-  "CUSTOMER_REPLY",
-  "NEW_ORDER_ALERT",
-  "CUSTOM_REPLY",
-] as const;
+import { OUTBOUND_TRIGGERS } from "@/lib/waha/triggers";
 const schema = z
   .object({
     phone_e164: z.string().trim().nullable().optional(),
     chat_id: z.string().trim().nullable().optional(),
     body: z.string().min(1).max(4096),
-    trigger_type: z.enum(triggers),
+    trigger_type: z.enum(OUTBOUND_TRIGGERS),
     reply_to_message_id: z.string().uuid().optional(),
     reply_to_wa_message_id: z.string().trim().max(255).optional(),
     idempotency_key: z.string().trim().min(1).max(255).optional(),

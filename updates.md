@@ -1289,3 +1289,53 @@ Menerapkan perbaikan fondasi keamanan dan kontrol versi repositori (P0):
 ### 4. Langkah Manual Pemilik Proyek (Known Issues / Perlu Verifikasi Manual)
 1. Pindahkan direktori proyek dari Google Drive (`/Users/michaelarhdyn/Library/CloudStorage/GoogleDrive-...`) ke direktori disk lokal murni (misal: `/Users/michaelarhdyn/projects/Botseri`).
 2. Rotasi nilai `ENCRYPTION_KEY`, API key provider LLM, dan token internal karena repositori sempat berada di dalam folder sinkronisasi cloud.
+
+---
+
+## [2026-11-04] S03: Kontrak, Enum Tunggal, dan Pembaruan Invarian
+
+### 1. Ringkasan Perbaikan
+Menerapkan fondasi kontrak sistem, enum tunggal trigger outbound, dan konsolidasi invarian arsitektur (P1):
+1. **Sumber Kebenaran Enum Tunggal Outbound (`triggers.ts`):**
+   - Membuat berkas kanonik `dashboard/src/lib/waha/triggers.ts` yang mengekspor konstanta `OUTBOUND_TRIGGERS` berisi 11 jenis pemicu pesan keluar yang sah: `CHAT_MASUK`, `MORNING_BRIEF`, `WORK_HOURS_REMINDER`, `END_OF_DAY_EVAL`, `PAIRING`, `TASK_ALARM`, `CUSTOMER_REPLY`, `CUSTOM_REPLY`, `NEW_ORDER_ALERT`, `OWNER_DIGEST` (fondasi S05), dan `CONFIRMATION_REPLY` (fondasi S04).
+   - Mendefinisikan `TRIGGER_PRIORITY` dengan pembagian prioritas P0 (Alarm, Alert, Digest), P1 (Interaksi Langsung Owner), dan P2 (Balasan Pelanggan).
+   - Mendefinisikan `TRIGGER_RECIPIENT_POLICY` untuk memvalidasi nomor penerima (`OWNER_ONLY`, `CUSTOMER_ONLY`, `ANY`).
+2. **Penyelarasan Enum di API Route:**
+   - Memperbarui skema Zod pada `dashboard/src/app/api/internal/waha/send/route.ts` agar menggunakan `z.enum(OUTBOUND_TRIGGERS)` langsung dari sumber kebenaran tunggal.
+3. **Koreksi Label Trigger pada Workflow Scheduler:**
+   - Memperbaiki node `http-send-alarm` ("Kirim WhatsApp Alarm") di `n8n-engine/workflows/botseri-scheduler.json` baris 115 agar mengirimkan `trigger_type: 'TASK_ALARM'` secara konsisten (menggantikan label lama `'WORK_HOURS_REMINDER'`).
+4. **Perluasan Validasi Kontrak Workflow & Uji Regresi:**
+   - Membuat skrip Node.js pendamping `scripts/validate-workflow-contracts.mjs` yang memverifikasi bahwa seluruh trigger outbound pada workflow n8n valid dan terdaftar di `OUTBOUND_TRIGGERS`, termasuk pengujian fixture negatif terisolasi.
+   - Mengintegrasikan pemeriksaan kontrak trigger ke dalam `scripts/validate-workflows.sh`.
+   - Menambahkan unit test kontrak `dashboard/tests/unit/workflow-contract.test.ts` (3 tes lulus 100%).
+5. **Konsolidasi Invarian Arsitektur Kanonik (`docs/INVARIANTS.md`):**
+   - Membuat dokumen kanonik tunggal `docs/INVARIANTS.md` merangkum `INV-01` s.d. `INV-16`.
+   - Memperbarui `INV-07 (revisi)` untuk alur pelanggan publik, `INV-13 (revisi)` untuk penjaga outbound WAHA dan enum tunggal, serta menambahkan invarian baru: `INV-14` (pemisahan data pelanggan tidak tepercaya), `INV-15` (konfirmasi dua langkah deterministik untuk aksi kritis/massal), dan `INV-16` (validasi graf alur kerja di server).
+   - Menautkan dokumen kanonik ini dari `docs/ARCHITECTURE.md`.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/waha/triggers.ts` | Baru | Sumber kebenaran tunggal `OUTBOUND_TRIGGERS`, `TRIGGER_PRIORITY`, dan `TRIGGER_RECIPIENT_POLICY`. |
+| `dashboard/src/app/api/internal/waha/send/route.ts` | Modifikasi | Validasi skema Zod menggunakan `z.enum(OUTBOUND_TRIGGERS)`. |
+| `n8n-engine/workflows/botseri-scheduler.json` | Modifikasi | Koreksi `trigger_type: 'TASK_ALARM'` pada node pengiriman alarm to-do. |
+| `scripts/validate-workflow-contracts.mjs` | Baru | Validator ekstrak literal trigger outbound dan uji fixture negatif. |
+| `scripts/validate-workflows.sh` | Modifikasi | Integrasi validasi kontrak trigger dan uji fixture negatif. |
+| `dashboard/tests/unit/workflow-contract.test.ts` | Baru | Pengujian unit kontrak workflow dan penolakan trigger ilegal. |
+| `docs/INVARIANTS.md` | Baru | Dokumen kanonik 16 invarian arsitektur Botseri (`INV-01` s.d. `INV-16`). |
+| `docs/ARCHITECTURE.md` | Modifikasi | Tautan dan sinkronisasi ringkasan tabel invarian sistem ke `docs/INVARIANTS.md`. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S03. |
+
+### 3. Hasil Verifikasi
+1. **Workflow Contract Test:** `npx vitest run tests/unit/workflow-contract.test.ts` lulus 3/3 tes.
+2. **Workflow Validator:** `./scripts/validate-workflows.sh` lulus 2 file workflow asli dan lulus uji fixture negatif.
+3. **Unit Test Suite:** 33 test file, **316 test cases** lulus 100%.
+4. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+5. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+6. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+7. **Grep Scheduler:** `grep -Rn "WORK_HOURS_REMINDER" n8n-engine/workflows/botseri-scheduler.json` bersih (0 kemunculan literal hardcoded pada job alarm).
+
+### 4. Migrasi & Rollback
+- Migrasi: Tidak ada migrasi database.
+- Rollback: `git revert <commit-s03>`
