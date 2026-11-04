@@ -6,6 +6,7 @@ export const InboundGateSchema = z.object({
   ignore_groups: z.boolean().default(true),
   rate_limit_per_minute: z.number().int().min(3).max(100).default(20),
   mute_bot_on_active_order: z.boolean().default(true),
+  mute_max_hours: z.number().int().min(1).max(336).default(48),
 });
 
 export const CustomerGreetingSchema = z.object({

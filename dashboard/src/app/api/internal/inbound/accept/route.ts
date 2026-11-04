@@ -7,7 +7,8 @@ import { recordEvent } from "@/lib/events";
 import { PAIRING_PATTERN, pairingHash } from "@/lib/pairing";
 import { resolveSenderE164, isLidSender, getLidIdentifier } from "@/lib/phone";
 import { lookupLidContact } from "@/lib/waha/client";
-import { normalizePhoneE164 } from "@/lib/customer/phone";
+import { normalizePhoneE164, toChatId } from "@/lib/customer/phone";
+import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
 import { looksLikeOrderForm } from "@/lib/customer/orderFormat";
 import { getActivePipelineConfig } from "@/lib/pipeline/manager";
 
@@ -359,15 +360,7 @@ export async function POST(request: Request) {
               },
             });
 
-            if (targetOrder.customer_contact) {
-              const cleanPhone = targetOrder.customer_contact.trim();
-              await prisma.customerSession.updateMany({
-                where: {
-                  phone_e164: { in: [cleanPhone, `+${cleanPhone}`, cleanPhone.replace(/^\+/, "")] },
-                },
-                data: { state: "ACTIVE", paused_at: null },
-              });
-            }
+            await unmuteCustomerSessionByOrder(targetOrder);
 
             await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
               action: pending.action,
@@ -385,7 +378,7 @@ export async function POST(request: Request) {
           const orderIds = (payload.order_ids as string[]) || [];
           const targetOrders = await prisma.order.findMany({
             where: { id: { in: orderIds }, deleted_at: null },
-            select: { id: true, customer_contact: true },
+            select: { id: true, customer_chat_id: true, customer_contact: true },
           });
 
           if (targetOrders.length > 0) {
@@ -407,15 +400,7 @@ export async function POST(request: Request) {
             });
 
             for (const o of targetOrders) {
-              if (o.customer_contact) {
-                const cleanPhone = o.customer_contact.trim();
-                await prisma.customerSession.updateMany({
-                  where: {
-                    phone_e164: { in: [cleanPhone, `+${cleanPhone}`, cleanPhone.replace(/^\+/, "")] },
-                  },
-                  data: { state: "ACTIVE", paused_at: null },
-                });
-              }
+              await unmuteCustomerSessionByOrder(o);
             }
 
             await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
@@ -497,6 +482,28 @@ export async function POST(request: Request) {
       normalizePhoneE164(targetChatId) ||
       normalizedPhone;
 
+    // Reset waiting_since dan unread_count pada sesi pelanggan karena owner sudah merespons manual
+    if (partnerPhone) {
+      const partnerSession = await prisma.customerSession.findUnique({
+        where: { phone_e164: partnerPhone },
+      });
+      if (partnerSession) {
+        const meta = (partnerSession.metadata as Record<string, unknown>) || {};
+        if (meta.waiting_since || meta.unread_count) {
+          await prisma.customerSession.update({
+            where: { id: partnerSession.id },
+            data: {
+              metadata: {
+                ...meta,
+                waiting_since: null,
+                unread_count: 0,
+              },
+            },
+          });
+        }
+      }
+    }
+
     if (looksLikeOrderForm(input.body ?? "")) {
       return response(
         true,
@@ -551,22 +558,80 @@ export async function POST(request: Request) {
   timestamps.push(now);
   customerRateLimitMap.set(validCustomerPhone, timestamps);
 
-  // 7. Bot Mute Policy & Auto-Heal: Periksa pesanan aktif pelanggan
+  // 7. Bot Mute Policy & Auto-Heal: Periksa pesanan aktif pelanggan via customer_chat_id & fallback
   const activeOrder = await prisma.order.findFirst({
     where: {
       deleted_at: null,
-      OR: [
-        { customer_contact: validCustomerPhone },
-        { customer_contact: validCustomerPhone.replace(/^\+/, "") },
-      ],
       status: {
         in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS],
       },
+      OR: [
+        { customer_chat_id: targetChatId },
+        { customer_chat_id: toChatId(validCustomerPhone) },
+        {
+          customer_chat_id: null,
+          customer_contact: { in: [validCustomerPhone, validCustomerPhone.replace(/^\+/, "")] },
+        },
+      ],
     },
     orderBy: { created_at: "desc" },
   });
 
-  if (activeOrder && gate.enabled && gate.mute_bot_on_active_order) {
+  const trimmedCustomerBody = (input.body || "").trim();
+  const isMenuBypass = /^(menu|baru)[.! ]*$/i.test(trimmedCustomerBody);
+
+  if (activeOrder && gate.enabled && gate.mute_bot_on_active_order && !isMenuBypass) {
+    const orderAgeHours = (Date.now() - new Date(activeOrder.created_at).getTime()) / (3600 * 1000);
+    const maxMuteHours = gate.mute_max_hours ?? 48;
+
+    const sessionMeta = (customerSession?.metadata as Record<string, unknown>) || {};
+    const ttlWarningSentAt = sessionMeta.ttl_warning_sent_at
+      ? new Date(String(sessionMeta.ttl_warning_sent_at)).getTime()
+      : null;
+    const warningCooldownPassed = !ttlWarningSentAt || (Date.now() - ttlWarningSentAt > 24 * 3600 * 1000);
+
+    if (orderAgeHours > maxMuteHours && warningCooldownPassed && customerSession) {
+      const ttlText = "Pesanan Anda sedang dikonfirmasi/ditangani admin. Ketik MENU untuk melihat pilihan.";
+      await prisma.customerSession.update({
+        where: { id: customerSession.id },
+        data: {
+          metadata: {
+            ...sessionMeta,
+            ttl_warning_sent_at: new Date().toISOString(),
+          },
+        },
+      });
+
+      return response(
+        true,
+        "MUTE_TTL_EXPIRED_REMINDER_SENT",
+        null,
+        targetChatId,
+        ttlText,
+        false,
+        validCustomerPhone,
+        "CUSTOMER",
+      );
+    }
+
+    // Catat waktu dan hitungan pesan belum terbaca untuk Owner Digest
+    if (customerSession) {
+      const currentWaitingSince = sessionMeta.waiting_since || new Date().toISOString();
+      const currentUnreadCount = (typeof sessionMeta.unread_count === "number" ? sessionMeta.unread_count : 0) + 1;
+
+      await prisma.customerSession.update({
+        where: { id: customerSession.id },
+        data: {
+          metadata: {
+            ...sessionMeta,
+            waiting_since: currentWaitingSince,
+            unread_count: currentUnreadCount,
+            last_unread_message: (input.body || "").slice(0, 150),
+          },
+        },
+      });
+    }
+
     return response(
       false,
       "ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED",
@@ -576,22 +641,12 @@ export async function POST(request: Request) {
   }
 
   // Auto-Heal: Jika activeOrder TIDAK ADA, pastikan sesi pelanggan tidak terkunci jeda
-  if (!activeOrder) {
-    await prisma.customerSession.updateMany({
-      where: {
-        phone_e164: { in: [validCustomerPhone, validCustomerPhone.replace(/^\+/, "")] },
-        OR: [
-          { paused_at: { not: null } },
-          { state: "PAUSED_FOR_OWNER" },
-        ],
-      },
-      data: {
-        state: "ACTIVE",
-        paused_at: null,
-      },
+  if (!activeOrder && customerSession) {
+    await unmuteCustomerSessionByOrder({
+      customer_chat_id: targetChatId,
+      customer_contact: validCustomerPhone,
     });
   }
-
   // 8. Selain itu -> accept: true, role: "CUSTOMER"
   const isOrder = looksLikeOrderForm(input.body ?? "");
   return response(

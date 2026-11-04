@@ -6,6 +6,7 @@ import { OrderPaymentStatus, OrderStatus } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
 import { recordEvent } from "@/lib/events";
+import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
 const UpdateOrderSchema = z.object({
   order_id: z.string().trim().min(1),
   action: z.enum([
@@ -48,25 +49,6 @@ function formatOperationalStatusText(status: OrderStatus): string {
   return "MENUNGGU pengerjaan/pengiriman";
 }
 
-async function unmuteCustomerSession(customerContact: string | null) {
-  if (!customerContact) return;
-  const rawContact = customerContact.trim();
-  const contactDigits = rawContact.replace(/\D/g, "");
-  await prisma.customerSession.updateMany({
-    where: {
-      OR: [
-        { phone_e164: rawContact },
-        { phone_e164: `+${contactDigits}` },
-        { phone_e164: contactDigits },
-      ],
-    },
-    data: {
-      state: "ACTIVE",
-      paused_at: null,
-    },
-  });
-}
-
 export async function POST(request: Request) {
   if (!authorizeInternal(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -94,7 +76,7 @@ export async function POST(request: Request) {
         status: { in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
         deleted_at: null,
       },
-      select: { id: true, customer_contact: true },
+      select: { id: true, customer_chat_id: true, customer_contact: true },
     });
 
     if (activeOrders.length === 0) {
@@ -243,7 +225,7 @@ export async function POST(request: Request) {
         notes: updatedNotes,
       },
     });
-    await unmuteCustomerSession(order.customer_contact);
+    await unmuteCustomerSessionByOrder(order);
     await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
       action: "MARK_COMPLETED",
       order_id: order.id,
@@ -338,7 +320,7 @@ export async function POST(request: Request) {
         notes: updatedNotes,
       },
     });
-    await unmuteCustomerSession(order.customer_contact);
+    await unmuteCustomerSessionByOrder(order);
     await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
       action: "COMPLETE_AND_PAY",
       order_id: order.id,

@@ -30,7 +30,7 @@ import { getSessionStatus } from "@/lib/waha/client";
 
 export type SchedulerJob = {
   job_id: string;
-  job_type: JobType | "TASK_ALARM";
+  job_type: JobType | "TASK_ALARM" | "OWNER_DIGEST";
   seq: number;
   chat_id: string;
   target_chat_id?: string;
@@ -398,6 +398,82 @@ async function pruneOldTickEvents(now: Date): Promise<void> {
   });
 }
 
+
+export async function buildOwnerDigestJob(
+  now: Date,
+  timezone: string,
+  ownerChatId: string
+): Promise<SchedulerJob | null> {
+  const sessions = await prisma.customerSession.findMany({
+    take: 20,
+  });
+
+  const waitingSessions = sessions.filter((s) => {
+    const meta = (s.metadata as Record<string, unknown>) || {};
+    return Boolean(meta.waiting_since) && Number(meta.unread_count) > 0;
+  });
+
+  if (waitingSessions.length === 0) return null;
+
+  const nowMs = now.getTime();
+  const maxWaitMs = Math.max(
+    ...waitingSessions.map((s) => {
+      const meta = (s.metadata as Record<string, unknown>) || {};
+      const ws = new Date(String(meta.waiting_since)).getTime();
+      return nowMs - ws;
+    })
+  );
+  const hasUrgentWait = maxWaitMs >= 6 * 3600 * 1000;
+
+  const nowMinutes = minutesOfDay(localTimeString(now, timezone));
+  const isReasonableHour = nowMinutes >= 7 * 60 && nowMinutes <= 21 * 60;
+
+  if (!isReasonableHour && !hasUrgentWait) {
+    return null;
+  }
+
+  const twoHoursAgo = new Date(nowMs - 2 * 3600 * 1000);
+  const recentDigest = await prisma.systemEvent.findFirst({
+    where: {
+      source: "SCHEDULER",
+      code: "OWNER_DIGEST_SENT",
+      ts: { gte: twoHoursAgo },
+    },
+  });
+
+  if (recentDigest) return null;
+
+  const lines = waitingSessions.map((s) => {
+    const meta = (s.metadata as Record<string, unknown>) || {};
+    const ws = new Date(String(meta.waiting_since)).getTime();
+    const waitMinutes = Math.max(1, Math.floor((nowMs - ws) / 60_000));
+    const waitStr =
+      waitMinutes < 60
+        ? `${waitMinutes} menit`
+        : `${Math.floor(waitMinutes / 60)} jam ${waitMinutes % 60} menit`;
+    const name = s.customer_name || s.phone_e164;
+    return `• ${name} · Menunggu ${waitStr}`;
+  });
+
+  const body = `*Pemberitahuan Owner: Pelanggan Menunggu Balasan*\n\nAda ${waitingSessions.length} pelanggan yang sedang menunggu balasan:\n${lines.join("\n")}\n\nSilakan cek WhatsApp dan balas chat pelanggan agar bot kembali aktif normal.`;
+
+  await recordEvent("INFO", "SCHEDULER", "OWNER_DIGEST_SENT", {
+    waiting_count: waitingSessions.length,
+    urgent: hasUrgentWait,
+  });
+
+  return {
+    job_id: `digest:${now.toISOString().slice(0, 13)}`,
+    job_type: "OWNER_DIGEST",
+    seq: 0,
+    chat_id: ownerChatId,
+    target_chat_id: ownerChatId,
+    body,
+    fallback_text: body,
+    messages: [{ role: "system", content: "OWNER_DIGEST" }],
+    skip_llm: true,
+  };
+}
 export async function tick(now: Date = new Date()): Promise<{ now_local: string; jobs: SchedulerJob[] }> {
   const settings = await prisma.botSettings.findUnique({ where: { id: 1 } });
   const timezone = settings?.timezone ?? "Asia/Jakarta";
@@ -454,6 +530,18 @@ export async function tick(now: Date = new Date()): Promise<{ now_local: string;
   } catch (alarmError) {
     await recordEvent("ERROR", "SCHEDULER", "TASK_ALARM_EVALUATION_FAILED", {
       error: alarmError instanceof Error ? alarmError.message : String(alarmError),
+    });
+  }
+
+  // EVALUASI DIGEST OWNER UNTUK PELANGGAN MENUNGGU
+  try {
+    const digestJob = await buildOwnerDigestJob(now, timezone, owner.chat_id);
+    if (digestJob) {
+      jobs.push(digestJob);
+    }
+  } catch (digestError) {
+    await recordEvent("ERROR", "SCHEDULER", "OWNER_DIGEST_EVALUATION_FAILED", {
+      error: digestError instanceof Error ? digestError.message : String(digestError),
     });
   }
 

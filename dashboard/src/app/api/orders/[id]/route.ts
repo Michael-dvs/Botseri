@@ -4,12 +4,13 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { log } from "@/lib/logger";
-
+import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
 const uuidSchema = z.string().uuid();
 
 const updateSchema = z.object({
   customer_name: z.string().trim().min(1).max(150).optional(),
   customer_contact: z.string().trim().max(50).nullable().optional(),
+  customer_chat_id: z.string().trim().max(100).nullable().optional(),
   description: z.string().trim().min(1).max(4000).optional(),
   event_date: z.string().datetime({ offset: true }).nullable().optional(),
   delivery_date: z.string().datetime({ offset: true }).nullable().optional(),
@@ -89,6 +90,10 @@ export async function PATCH(
           input.customer_contact === undefined
             ? existing.customer_contact
             : input.customer_contact,
+        customer_chat_id:
+          input.customer_chat_id === undefined
+            ? existing.customer_chat_id
+            : input.customer_chat_id,
         description: input.description ?? existing.description,
         event_date:
           input.event_date === undefined
@@ -125,24 +130,8 @@ export async function PATCH(
     });
 
     // AUTO-UNMUTE: Buka kunci sesi pelanggan terkait di customer_sessions
-    if (order.status === "COMPLETED" && order.customer_contact) {
-      const cleanPhone = order.customer_contact.trim();
-      const withPlus = cleanPhone.startsWith("+") ? cleanPhone : `+${cleanPhone}`;
-      const withoutPlus = cleanPhone.replace(/^\+/, "");
-
-      await prisma.customerSession.updateMany({
-        where: {
-          phone_e164: { in: [cleanPhone, withPlus, withoutPlus] },
-        },
-        data: {
-          state: "ACTIVE",
-          paused_at: null,
-          metadata: {
-            draft: null,
-            retry_count: 0,
-          },
-        },
-      });
+    if (order.status === "COMPLETED") {
+      await unmuteCustomerSessionByOrder(order);
     }
 
     return NextResponse.json({ ok: true, order: toResponse(order) });
@@ -177,21 +166,7 @@ export async function DELETE(
       },
     });
 
-    if (order.customer_contact) {
-      const cleanPhone = order.customer_contact.trim();
-      const withPlus = cleanPhone.startsWith("+") ? cleanPhone : `+${cleanPhone}`;
-      const withoutPlus = cleanPhone.replace(/^\+/, "");
-
-      await prisma.customerSession.updateMany({
-        where: {
-          phone_e164: { in: [cleanPhone, withPlus, withoutPlus] },
-        },
-        data: {
-          state: "ACTIVE",
-          paused_at: null,
-        },
-      });
-    }
+    await unmuteCustomerSessionByOrder(order);
 
     return NextResponse.json({ ok: true });
   } catch (error) {

@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
 import { chatCompletion } from "@/lib/llm-gateway";
 import { parseChoice } from "@/lib/customer/choice";
+import { toChatId } from "@/lib/customer/phone";
 import {
   looksLikeOrderForm,
   parseDateId,
@@ -732,6 +733,7 @@ export async function POST(request: Request) {
             data: {
               customer_name: draftMerged.nama_pemesan!.slice(0, 150),
               customer_contact: customer_phone.slice(0, 50),
+              customer_chat_id: toChatId(customer_phone),
               description: draftMerged.jenis_pesanan!,
               event_date: eventDate,
               delivery_address: draftMerged.alamat!,

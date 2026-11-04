@@ -8,6 +8,7 @@ import { log } from "@/lib/logger";
 const createSchema = z.object({
   customer_name: z.string().trim().min(1).max(150),
   customer_contact: z.string().trim().max(50).nullable().optional(),
+  customer_chat_id: z.string().trim().max(100).nullable().optional(),
   description: z.string().trim().min(1).max(4000),
   event_date: z.string().datetime({ offset: true }).nullable().optional(),
   delivery_date: z.string().datetime({ offset: true }).nullable().optional(),
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
       data: {
         customer_name: input.customer_name,
         customer_contact: input.customer_contact ?? null,
+        customer_chat_id: input.customer_chat_id ?? null,
         description: input.description,
         event_date: input.event_date ? new Date(input.event_date) : null,
         delivery_date: input.delivery_date

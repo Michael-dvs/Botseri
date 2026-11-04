@@ -23,7 +23,9 @@ const {
   orderFindManyMock,
   orderUpdateManyMock,
   pipelineConfigFindUniqueMock,
+  customerSessionFindManyMock,
   customerSessionUpdateManyMock,
+  customerSessionUpdateMock,
   pendingConfirmationFindFirstMock,
   pendingConfirmationUpdateManyMock,
 } = vi.hoisted(() => ({
@@ -46,7 +48,9 @@ const {
   orderFindManyMock: vi.fn(),
   orderUpdateManyMock: vi.fn(),
   pipelineConfigFindUniqueMock: vi.fn(),
+  customerSessionFindManyMock: vi.fn(),
   customerSessionUpdateManyMock: vi.fn(),
+  customerSessionUpdateMock: vi.fn(),
   pendingConfirmationFindFirstMock: vi.fn(),
   pendingConfirmationUpdateManyMock: vi.fn(),
 }));
@@ -90,7 +94,9 @@ vi.mock("@/lib/db", () => {
       },
       customerSession: {
         findUnique: (...args: unknown[]) => customerSessionFindUniqueMock(...args),
+        findMany: (...args: unknown[]) => customerSessionFindManyMock(...args),
         updateMany: (...args: unknown[]) => customerSessionUpdateManyMock(...args),
+        update: (...args: unknown[]) => customerSessionUpdateMock(...args),
       },
       authorizedNumber: {
         findFirst: (...args: unknown[]) => authorizedNumberFindFirstMock(...args),
@@ -481,9 +487,91 @@ describe("POST /api/internal/inbound/accept", () => {
     expect(data.reason).toBe("ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED");
   });
 
-  it("auto-heals customer session and accepts chat when customer has no active orders", async () => {
+  it("bypasses mute when customer with active order explicitly sends 'MENU' or 'BARU'", async () => {
     authorizedNumberFindFirstMock.mockResolvedValue(null);
     customerSessionFindUniqueMock.mockResolvedValue(null);
+    orderFindFirstMock.mockResolvedValue({
+      id: "active-ord-1",
+      customer_chat_id: "6289999999999@c.us",
+      customer_contact: "+6289999999999",
+      status: "IN_PROGRESS",
+      created_at: new Date(),
+    });
+
+    const req = makeRequest({
+      wa_message_id: "msg-cust-bypass",
+      chat_id: "6289999999999@c.us",
+      body: "MENU",
+      received_at: new Date().toISOString(),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.accept).toBe(true);
+    expect(data.role).toBe("CUSTOMER");
+  });
+
+  it("sends reminder once when mute TTL is exceeded (MUTE_TTL_EXPIRED_REMINDER_SENT)", async () => {
+    authorizedNumberFindFirstMock.mockResolvedValue(null);
+    const pastDate = new Date(Date.now() - 50 * 3600 * 1000); // 50 jam lalu (> 48 jam)
+    orderFindFirstMock.mockResolvedValue({
+      id: "active-ord-old",
+      customer_chat_id: "6289999999999@c.us",
+      customer_contact: "+6289999999999",
+      status: "IN_PROGRESS",
+      created_at: pastDate,
+    });
+
+    const session = {
+      id: "sess-cust-old",
+      phone_e164: "+6289999999999",
+      metadata: {},
+    };
+    customerSessionFindUniqueMock.mockResolvedValue(session);
+    customerSessionUpdateMock.mockResolvedValue({});
+
+    const req = makeRequest({
+      wa_message_id: "msg-cust-ttl-expired",
+      chat_id: "6289999999999@c.us",
+      body: "halo gimana pesanan saya?",
+      received_at: new Date().toISOString(),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.accept).toBe(true);
+    expect(data.reason).toBe("MUTE_TTL_EXPIRED_REMINDER_SENT");
+    expect(data.reply_text).toContain("Pesanan Anda sedang dikonfirmasi/ditangani admin");
+    expect(data.reply_text).toContain("Ketik MENU");
+    expect(customerSessionUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "sess-cust-old" },
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            ttl_warning_sent_at: expect.any(String),
+          }),
+        }),
+      })
+    );
+  });
+
+  it("auto-heals customer session and accepts chat when customer has no active orders", async () => {
+    authorizedNumberFindFirstMock.mockResolvedValue(null);
+    customerSessionFindUniqueMock.mockResolvedValue({
+      id: "sess-heal-1",
+      phone_e164: "+6289999999999",
+      metadata: { waiting_since: "2026-11-04T10:00:00Z", unread_count: 2 },
+    });
+    customerSessionFindManyMock.mockResolvedValue([
+      {
+        id: "sess-heal-1",
+        phone_e164: "+6289999999999",
+        metadata: { waiting_since: "2026-11-04T10:00:00Z", unread_count: 2 },
+      },
+    ]);
+    customerSessionUpdateMock.mockResolvedValue({});
     orderFindFirstMock.mockResolvedValue(null); // No active order
 
     const req = makeRequest({
@@ -498,12 +586,17 @@ describe("POST /api/internal/inbound/accept", () => {
     const data = await res.json();
     expect(data.accept).toBe(true);
     expect(data.role).toBe("CUSTOMER");
-    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(
+    expect(customerSessionUpdateMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: {
+        where: { id: "sess-heal-1" },
+        data: expect.objectContaining({
           state: "ACTIVE",
           paused_at: null,
-        },
+          metadata: expect.objectContaining({
+            waiting_since: null,
+            unread_count: 0,
+          }),
+        }),
       })
     );
   });
@@ -614,7 +707,7 @@ describe("POST /api/internal/inbound/accept", () => {
         }),
       })
     );
-    expect(customerSessionUpdateManyMock).toHaveBeenCalled();
+    expect(customerSessionFindManyMock).toHaveBeenCalled();
   });
 
   it("prevents self-confirmation when message_id matches created_message_id", async () => {

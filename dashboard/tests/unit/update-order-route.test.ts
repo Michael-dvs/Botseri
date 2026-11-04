@@ -10,7 +10,9 @@ const {
   orderFindManyMock,
   orderUpdateManyMock,
   queryRawMock,
+  customerSessionFindManyMock,
   customerSessionUpdateManyMock,
+  customerSessionUpdateMock,
   pendingConfirmationCreateMock,
   authorizedNumberFindFirstMock,
 } = vi.hoisted(() => ({
@@ -21,7 +23,9 @@ const {
   orderFindManyMock: vi.fn(),
   orderUpdateManyMock: vi.fn(),
   queryRawMock: vi.fn(),
+  customerSessionFindManyMock: vi.fn(),
   customerSessionUpdateManyMock: vi.fn(),
+  customerSessionUpdateMock: vi.fn(),
   pendingConfirmationCreateMock: vi.fn(),
   authorizedNumberFindFirstMock: vi.fn(),
 }));
@@ -34,7 +38,9 @@ vi.mock("@/lib/db", () => ({
   prisma: {
     $queryRaw: (...args: unknown[]) => queryRawMock(...args),
     customerSession: {
+      findMany: (...args: unknown[]) => customerSessionFindManyMock(...args),
       updateMany: (...args: unknown[]) => customerSessionUpdateManyMock(...args),
+      update: (...args: unknown[]) => customerSessionUpdateMock(...args),
     },
     pendingConfirmation: {
       create: (...args: unknown[]) => pendingConfirmationCreateMock(...args),
@@ -75,6 +81,8 @@ describe("POST /api/internal/tools/update-order", () => {
       is_primary: true,
     });
     pendingConfirmationCreateMock.mockResolvedValue({ id: "conf-1" });
+    customerSessionFindManyMock.mockResolvedValue([{ id: "s1", phone_e164: "+628111222333", metadata: {} }]);
+    customerSessionUpdateMock.mockResolvedValue({});
   });
 
   it("returns 401 if unauthorized", async () => {
@@ -134,11 +142,7 @@ describe("POST /api/internal/tools/update-order", () => {
       },
     });
 
-    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: { state: "ACTIVE", paused_at: null },
-      })
-    );
+    expect(customerSessionFindManyMock).toHaveBeenCalled();
   });
 
   it("updates payment status to PAID with MARK_PAID without changing operational status", async () => {

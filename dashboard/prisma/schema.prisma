@@ -155,6 +155,7 @@ model Order {
   id               String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   customer_name    String             @db.VarChar(150)
   customer_contact String?            @db.VarChar(50)
+  customer_chat_id String?            @db.VarChar(100)
   description      String             @db.Text
   event_date       DateTime?          @db.Timestamptz
   delivery_date    DateTime?          @db.Timestamptz
@@ -172,6 +173,7 @@ model Order {
 
   @@index([status])
   @@index([customer_contact])
+  @@index([customer_chat_id, status])
   @@index([deleted_at])
   @@map("orders")
 }

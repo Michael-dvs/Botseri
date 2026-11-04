@@ -1483,6 +1483,21 @@ export function PipelineStudio({
                   </div>
                 </label>
 
+                {Boolean(selectedData.mute_bot_on_active_order !== false) && (
+                  <div className="flex flex-col gap-1 pl-6">
+                    <label className="text-xs font-semibold text-neutral-800">Batas Waktu Mute (Jam)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={336}
+                      value={Number(selectedData.mute_max_hours || 48)}
+                      onChange={(e) => updateSelectedNodeData({ mute_max_hours: parseInt(e.target.value, 10) || 48 })}
+                      className="field max-w-28 text-xs font-mono"
+                    />
+                    <p className="text-[10px] text-neutral-500">Maksimal jam bot diam saat order aktif sebelum mengirim opsi menu (default 48 jam).</p>
+                  </div>
+                )}
+
                 <label className="flex items-start gap-2.5 cursor-pointer">
                   <input
                     type="checkbox"

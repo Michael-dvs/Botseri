@@ -1411,3 +1411,68 @@ Menerapkan pengamanan menyeluruh terhadap ancaman Indirect Prompt Injection, aks
   DROP INDEX IF EXISTS "orders_deleted_at_idx";
   ALTER TABLE "orders" DROP COLUMN IF EXISTS "deleted_at";
   ```
+
+---
+
+## [2026-11-04] S05: Integritas Pesanan-Sesi dan Kebijakan Mute
+
+### 1. Ringkasan Perbaikan
+Menerapkan perbaikan integritas relasi sesi pesanan, normalisasi nomor telepon, kebijakan batas waktu (TTL) mute, dan ringkasan berkala ke owner (P0):
+1. **Normalisasi Telepon Indonesia E.164 (`lib/customer/phone.ts`):**
+   - Menambahkan fungsi `normalizePhone(input)` untuk menghasilkan string digit murni E.164 standar Indonesia (`628...`, mengubah `08xx`, `+628xx`, `8xx`, membuang karakter pemisah spasi/strip/titik/plus/tanda kurung, menghapus akhiran `@c.us` dan `:1`, serta memvalidasi batas panjang 8 s.d. 16 digit).
+   - Menambahkan fungsi `toChatId(phone)` yang mengonversi nomor telepon menjadi JID WhatsApp resmi (`<digits>@c.us`).
+2. **Migrasi Kolom `orders.customer_chat_id` & Relasi Sesi yang Kuat:**
+   - Menambahkan kolom `orders.customer_chat_id text null` dengan indeks `(customer_chat_id, status)` di skema Prisma dan migrasi SQL forward-only.
+   - Saat pesanan dibuat via alur pelanggan di `customer/handle/route.ts`, kolom `customer_chat_id` langsung diisi dari JID sesi WhatsApp (`toChatId(customer_phone)`), bukan dari nomor mentah formulir.
+   - Pesanan buatan owner via dashboard/tool dibiarkan bernilai `customer_chat_id: null` sehingga tidak memicu mute keliru pada nomor pelanggan.
+   - Membuat skrip backfill `dashboard/scripts/backfill-customer-chat-id.ts` untuk mencocokkan data pesanan lama dengan nomor sesi `customer_sessions`.
+   - Membuat helper terpadu `unmuteCustomerSessionByOrder` (`lib/customer/session.ts`) yang mengutamakan `customer_chat_id` dengan fallback ke `customer_contact`.
+3. **Batas Waktu (TTL) Mute & Pengecualian Kata Kunci:**
+   - Menambahkan field `inbound_gate.mute_max_hours` (default 48 jam, rentang 1 s.d. 336 jam) pada skema pipeline dan panel inspektor Studio Pipeline.
+   - Jika umur pesanan aktif melampaui `mute_max_hours`, bot mengirimkan satu kali pesan pengingat: *"Pesanan Anda sedang dikonfirmasi/ditangani admin. Ketik MENU untuk melihat pilihan."*
+   - Pengecualian bypass: jika pelanggan yang sedang di-mute mengetik pesan dengan kata kunci `"MENU"` atau `"BARU"`, bot seketika merespons (`accept: true`) tanpa memblokir pesan pelanggan.
+4. **Pemberitahuan Berkala ke Owner (`OWNER_DIGEST`):**
+   - Saat pelanggan yang di-mute mengirim pesan, sistem mencatat waktu tunggu awal di `customer_sessions.metadata.waiting_since` dan menambah `unread_count`.
+   - Pada scheduler tick (`lib/scheduler/tick.ts`), sistem secara otomatis mengevaluasi job `OWNER_DIGEST` deterministik (tanpa LLM) setiap jendela 2 jam jika ada pelanggan yang menunggu balasan, pada jam wajar (07:00 s.d. 21:00) atau kapan saja jika pelanggan telah menunggu lebih dari 6 jam.
+   - Menghapus penanda `waiting_since` saat owner membalas pesan manual atau saat pesanan diselesaikan/dibatalkan.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/customer/phone.ts` | Modifikasi | Penambahan fungsi `normalizePhone` dan `toChatId` serta penanganan format lokal Indonesia. |
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan kolom `Order.customer_chat_id` dan indeks `@@index([customer_chat_id, status])`. |
+| `dashboard/prisma/migrations/20261104120000_add_customer_chat_id_to_orders/migration.sql` | Baru | Migrasi SQL forward-only penambahan kolom `customer_chat_id` dan indeks status. |
+| `dashboard/src/lib/customer/session.ts` | Baru | Helper terpadu `unmuteCustomerSessionByOrder` untuk membuka kunci sesi pelanggan via chat ID / kontak. |
+| `dashboard/src/lib/pipeline/schema.ts` | Modifikasi | Penambahan field `inbound_gate.mute_max_hours` (default 48 jam, min 1, max 336). |
+| `dashboard/src/lib/pipeline/presets.ts` | Modifikasi | Pendaftaran nilai default `mute_max_hours: 48` pada ketiga preset alur kerja. |
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Modifikasi | Sinkronisasi `mute_max_hours` pada `syncGraphToCoreConfig`. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Field konfigurasi input batas waktu mute (jam) di panel inspektor `TRIGGER_INBOUND`. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Pengisian `customer_chat_id` saat pesanan dibuat dari alur chat pelanggan. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Pengecekan active order via `customer_chat_id`, bypass mute "MENU"/"BARU", mute TTL reminder, tracking waiting_since, dan reset unread saat owner membalas manual. |
+| `dashboard/src/app/api/internal/tools/update-order/route.ts` | Modifikasi | Penggunaan `unmuteCustomerSessionByOrder` saat pesanan diselesaikan. |
+| `dashboard/src/app/api/orders/[id]/route.ts` | Modifikasi | Dukungan field `customer_chat_id` dan pembukaan sesi terpadu pasca-penyelesaian/penghapusan order. |
+| `dashboard/src/app/api/orders/route.ts` | Modifikasi | Dukungan field `customer_chat_id` pada pembuatan pesanan manual. |
+| `dashboard/src/lib/scheduler/tick.ts` | Modifikasi | Fungsi `buildOwnerDigestJob` dan evaluasi berkala job `OWNER_DIGEST` pada scheduler tick. |
+| `dashboard/scripts/backfill-customer-chat-id.ts` & `scripts/backfill-customer-chat-id.ts` | Baru | Skrip migrasi backfill untuk menyelaraskan data `orders` lama ke `customer_sessions`. |
+| `dashboard/tests/unit/s05-order-session-mute.test.ts` | Baru | Pengujian unit normalisasi nomor telepon, unmuter sesi terpadu, dan evaluasi `buildOwnerDigestJob`. |
+| `dashboard/tests/unit/inbound-accept.test.ts` | Modifikasi | Pengujian integrasi bypass mute "MENU" dan kedaluwarsa TTL mute. |
+| `dashboard/tests/unit/api-orders-id-route.test.ts` | Modifikasi | Pengujian unit `unmuteCustomerSessionByOrder` pada update/delete order. |
+| `dashboard/tests/unit/update-order-route.test.ts` | Modifikasi | Pengujian unit `unmuteCustomerSessionByOrder` pada tool update order. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S05. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 35 test file, **348 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+5. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+6. **Audit Penggunaan `customer_contact`:** Seluruh referensi tersisa adalah pembacaan kontak manusia, parameter display UI, atau fallback data lama.
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104120000_add_customer_chat_id_to_orders` (penambahan kolom `orders.customer_chat_id`, indeks `orders_customer_chat_id_status_idx`).
+- Rollback Migrasi:
+  ```sql
+  DROP INDEX IF EXISTS "orders_customer_chat_id_status_idx";
+  ALTER TABLE "orders" DROP COLUMN IF EXISTS "customer_chat_id";
+  ```

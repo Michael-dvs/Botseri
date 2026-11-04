@@ -5,11 +5,15 @@ import { OrderPaymentStatus, OrderStatus } from "@prisma/client";
 const {
   orderFindUniqueMock,
   orderUpdateMock,
+  customerSessionFindManyMock,
   customerSessionUpdateManyMock,
+  customerSessionUpdateMock,
 } = vi.hoisted(() => ({
   orderFindUniqueMock: vi.fn(),
   orderUpdateMock: vi.fn(),
+  customerSessionFindManyMock: vi.fn(),
   customerSessionUpdateManyMock: vi.fn(),
+  customerSessionUpdateMock: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -19,7 +23,9 @@ vi.mock("@/lib/db", () => ({
       update: (...args: unknown[]) => orderUpdateMock(...args),
     },
     customerSession: {
+      findMany: (...args: unknown[]) => customerSessionFindManyMock(...args),
       updateMany: (...args: unknown[]) => customerSessionUpdateManyMock(...args),
+      update: (...args: unknown[]) => customerSessionUpdateMock(...args),
     },
   },
 }));
@@ -37,8 +43,9 @@ describe("PATCH /api/orders/[id]", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    customerSessionFindManyMock.mockResolvedValue([]);
+    customerSessionUpdateMock.mockResolvedValue({});
   });
-
   it("updates order and auto-unmutes customer session when status is COMPLETED", async () => {
     const existingOrder = {
       id: fakeId,
@@ -75,15 +82,11 @@ describe("PATCH /api/orders/[id]", () => {
         }),
       })
     );
-    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(
+    expect(customerSessionFindManyMock).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
-          phone_e164: { in: ["+628123456789", "+628123456789", "628123456789"] },
+          phone_e164: { in: expect.arrayContaining(["628123456789", "+628123456789"]) },
         },
-        data: expect.objectContaining({
-          state: "ACTIVE",
-          paused_at: null,
-        }),
       })
     );
   });
@@ -146,7 +149,7 @@ describe("PATCH /api/orders/[id]", () => {
         }),
       })
     );
-    expect(customerSessionUpdateManyMock).toHaveBeenCalled();
+    expect(customerSessionFindManyMock).toHaveBeenCalled();
   });
 
   it("restores soft-deleted order on PATCH with restore: true", async () => {

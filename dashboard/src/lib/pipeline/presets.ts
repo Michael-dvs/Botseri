@@ -163,6 +163,7 @@ const FLORIST_DECOR_BASE: Omit<PipelineConfigData, "graph"> = {
     ignore_groups: true,
     rate_limit_per_minute: 20,
     mute_bot_on_active_order: true,
+    mute_max_hours: 48,
   },
   customer_greeting: {
     enabled: true,
@@ -254,6 +255,7 @@ const GENERIC_COMMERCE_BASE: Omit<PipelineConfigData, "graph"> = {
     ignore_groups: true,
     rate_limit_per_minute: 25,
     mute_bot_on_active_order: true,
+    mute_max_hours: 48,
   },
   customer_greeting: {
     enabled: true,
@@ -338,6 +340,7 @@ const PERSONAL_ASSISTANT_BASE: Omit<PipelineConfigData, "graph"> = {
     ignore_groups: true,
     rate_limit_per_minute: 20,
     mute_bot_on_active_order: false,
+    mute_max_hours: 48,
   },
   customer_greeting: {
     enabled: false,

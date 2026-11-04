@@ -111,6 +111,10 @@ export function syncGraphToCoreConfig(
             typeof data.mute_bot_on_active_order === "boolean"
               ? data.mute_bot_on_active_order
               : synced.inbound_gate.mute_bot_on_active_order,
+          mute_max_hours:
+            typeof data.mute_max_hours === "number"
+              ? data.mute_max_hours
+              : synced.inbound_gate.mute_max_hours,
         };
         break;
       }
