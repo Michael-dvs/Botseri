@@ -1636,3 +1636,53 @@ Menerapkan antrean berbobot prioritas P0-P2 pada `humanizer.ts` (`TASK_ALARM`, `
   DROP TABLE IF EXISTS "runtime_flags";
   ALTER TABLE "customer_sessions" DROP COLUMN IF EXISTS "blocked_at";
   ```
+
+## [2026-11-04] S10: Refactor Duplikasi dan Satu Engine (P2)
+
+### 1. Ringkasan Perbaikan
+Mengonsolidasikan arsitektur internal tanpa regresi fungsional:
+1. Menyatukan manipulasi database pesanan dan sesi pelanggan ke dalam service domain tunggal `dashboard/src/lib/orders/service.ts` (`completeOrder`, `cancelOrder`, `softDeleteOrder`, `setOrderStatus`, `markPayment`, `hasActiveOrder`, `releaseCustomerSession`, `listOrdersSegmented`), serta merefaktor seluruh endpoint pemanggil menjadi pembungkus tipis.
+2. Menetapkan spesifikasi kanonik tunggal `getPrimaryOwner` pada `dashboard/src/lib/owner/primary.ts` dengan pembersihan pra-migrasi dan penegakan unique index parsial PostgreSQL (`authorized_numbers_one_primary` pada `is_primary = true`).
+3. Menyatukan evaluator alur kerja visual ke dalam satu engine terpadu `dashboard/src/lib/pipeline/engine.ts` (`runPipelineStep`) dan menghubungkan simulator studio `simulator.ts` langsung ke engine inti untuk eliminasi percabangan graf paralel.
+4. Menambahkan 20 skenario uji paritas simulator vs runtime yang membuktikan konsistensi hasil eksekusi 100%.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/orders/service.ts` | Baru | Service domain pesanan atomik, segmentasi pesanan, pengecekan pesanan aktif, dan pembukaan sesi pelanggan. |
+| `dashboard/src/lib/owner/primary.ts` | Baru | Modul kanonik tunggal penentuan owner utama Botseri (`getPrimaryOwner`) dengan mekanisme auto-heal. |
+| `dashboard/prisma/migrations/20261104220000_add_unique_primary_owner_index/migration.sql` | Baru | Migrasi SQL forward-only pembersihan data dan pembuatan indeks unik parsial `authorized_numbers_one_primary`. |
+| `dashboard/src/lib/pipeline/engine.ts` | Baru | Mesin alur kerja visual murni terpadu `runPipelineStep` untuk evaluasi simpul runtime dan simulasi. |
+| `dashboard/src/lib/pipeline/simulator.ts` | Baru | Simulator studio yang mendelegasikan eksekusi langsung ke `runPipelineStep` (`dryRun: true`). |
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Modifikasi | Re-ekspor `simulatePipelineExecution` dari `simulator.ts` untuk eliminasi duplikasi logika simulator. |
+| `dashboard/src/app/api/internal/tools/get-orders/route.ts` | Modifikasi | Refactor menjadi pemanggil tipis fungsi `listOrdersSegmented` pada service pesanan. |
+| `dashboard/src/app/api/internal/tools/update-order/route.ts` | Modifikasi | Refactor pembaruan pesanan via service dan standarisasi pengambilan owner via `getPrimaryOwner`. |
+| `dashboard/src/app/api/orders/[id]/route.ts` | Modifikasi | Penggunaan `softDeleteOrder` pada penghapusan pesanan dan import service. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Pengecekan active order pelanggan via `getActiveOrderForCustomer` dari service. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Standarisasi pengambilan owner utama via `getPrimaryOwner` dari `owner/primary.ts`. |
+| `dashboard/src/app/api/internal/scheduler/jobs/[jobId]/result/route.ts` | Modifikasi | Import langsung `getPrimaryOwner` dari `owner/primary.ts`. |
+| `dashboard/src/lib/scheduler/queries.ts` | Modifikasi | Re-ekspor kanonik `getPrimaryOwner` dari `owner/primary.ts`. |
+| `dashboard/tests/unit/orders-service.test.ts` | Baru | Pengujian unit 8 skenario service transaksi pesanan dan kebijakan buka kunci sesi. |
+| `dashboard/tests/unit/owner-primary.test.ts` | Baru | Pengujian unit spesifikasi kanonik `getPrimaryOwner` dan auto-heal. |
+| `dashboard/tests/unit/pipeline-parity.test.ts` | Baru | Pengujian paritas 20 skenario alur graf simulator vs runtime. |
+| `dashboard/tests/unit/authorized-numbers.test.ts` | Modifikasi | Penyelarasan pengujian unit `getPrimaryOwner` dengan spesifikasi kanonik S10. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S10. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 44 test file, **420 test cases** lulus 100%.
+2. **Audit Pembersihan Kode:**
+   - `grep -Rn "getPrimaryOwner" dashboard/src`: Terpusat mengimpor dari `lib/owner/primary.ts`.
+   - Paritas Simulator vs Runtime: 20/20 skenario terverifikasi menghasilkan `next_state`, `nodeTrace`, dan `replies` identik.
+3. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+4. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+5. **Smoke Test:** `./scripts/smoke.sh` lulus bersih (11 pemeriksaan lulus, 0 kegagalan).
+6. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+7. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104220000_add_unique_primary_owner_index` (pembersihan pra-migrasi dan indeks unik parsial `authorized_numbers_one_primary`).
+- Rollback Migrasi:
+  ```sql
+  DROP INDEX IF EXISTS "authorized_numbers_one_primary";
+  ```
