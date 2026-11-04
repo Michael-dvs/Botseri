@@ -44,16 +44,15 @@ describe("Authorized Numbers & Primary Owner Selection", () => {
       expect(owner).toEqual(mockPrimaryOwner);
       expect(prisma.authorizedNumber.findFirst).toHaveBeenCalledWith({
         where: { is_owner: true, is_primary: true },
-        orderBy: { updated_at: "desc" },
       });
     });
 
-    it("fallback ke nomor owner yang paling terakhir diperbarui jika tidak ada is_primary", async () => {
+    it("fallback ke nomor owner paling awal (created_at asc) dan auto-heal is_primary jika tidak ada is_primary", async () => {
       // Panggilan pertama untuk primary mengembalikan null
       vi.mocked(prisma.authorizedNumber.findFirst).mockResolvedValueOnce(null);
 
-      // Panggilan kedua fallback mengembalikan nomor terbaru
-      const mockFallbackOwner = {
+      // Panggilan kedua fallback mengembalikan nomor tertua
+      const mockOldestOwner = {
         id: "owner-fallback-uuid",
         phone_e164: "+6289876543210",
         chat_id: "6289876543210@c.us",
@@ -64,19 +63,26 @@ describe("Authorized Numbers & Primary Owner Selection", () => {
         updated_at: new Date("2026-10-27T12:00:00Z"),
       };
       vi.mocked(prisma.authorizedNumber.findFirst).mockResolvedValueOnce(
-        mockFallbackOwner as never,
+        mockOldestOwner as never,
       );
+      vi.mocked(prisma.authorizedNumber.update).mockResolvedValueOnce({
+        ...mockOldestOwner,
+        is_primary: true,
+      } as never);
 
       const owner = await getPrimaryOwner();
 
-      expect(owner).toEqual(mockFallbackOwner);
+      expect(owner).toEqual({ ...mockOldestOwner, is_primary: true });
       expect(prisma.authorizedNumber.findFirst).toHaveBeenNthCalledWith(1, {
         where: { is_owner: true, is_primary: true },
-        orderBy: { updated_at: "desc" },
       });
       expect(prisma.authorizedNumber.findFirst).toHaveBeenNthCalledWith(2, {
         where: { is_owner: true },
-        orderBy: [{ updated_at: "desc" }, { created_at: "desc" }],
+        orderBy: { created_at: "asc" },
+      });
+      expect(prisma.authorizedNumber.update).toHaveBeenCalledWith({
+        where: { id: "owner-fallback-uuid" },
+        data: { is_primary: true },
       });
     });
 

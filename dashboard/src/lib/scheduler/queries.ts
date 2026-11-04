@@ -26,18 +26,7 @@ export type PromptTodo = {
   hanging: boolean;
 };
 
-export async function getPrimaryOwner() {
-  const primary = await prisma.authorizedNumber.findFirst({
-    where: { is_owner: true, is_primary: true },
-    orderBy: { updated_at: "desc" },
-  });
-  if (primary) return primary;
-
-  return prisma.authorizedNumber.findFirst({
-    where: { is_owner: true },
-    orderBy: [{ updated_at: "desc" }, { created_at: "desc" }],
-  });
-}
+export { getPrimaryOwner } from "@/lib/owner/primary";
 
 
 export const DEFAULT_ALARM_CONFIG = {

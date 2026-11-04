@@ -4,6 +4,7 @@ import { OrderPaymentStatus, type CustomerSessionState, type Prisma } from "@pri
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
 import { recordEvent } from "@/lib/events";
+import { getPrimaryOwner } from "@/lib/owner/primary";
 import { chatCompletion } from "@/lib/llm-gateway";
 import { parseChoice } from "@/lib/customer/choice";
 import { toChatId } from "@/lib/customer/phone";
@@ -115,25 +116,6 @@ interface ReplyItem {
   trigger_type?: string;
 }
 
-async function getPrimaryOwner() {
-  // 1. Cari yang is_primary = true
-  let owner = await prisma.authorizedNumber.findFirst({
-    where: { is_primary: true },
-  });
-  // 2. Jika tidak ada, ambil nomor authorized pertama mana pun
-  if (!owner) {
-    owner = await prisma.authorizedNumber.findFirst({
-      orderBy: { created_at: "asc" },
-    });
-    if (owner) {
-      await prisma.authorizedNumber.update({
-        where: { id: owner.id },
-        data: { is_primary: true },
-      });
-    }
-  }
-  return owner;
-}
 
 export async function POST(request: Request) {
   if (!authorizeInternal(request)) {

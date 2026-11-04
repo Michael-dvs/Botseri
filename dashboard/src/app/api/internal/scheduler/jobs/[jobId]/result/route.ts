@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { recordEvent } from "@/lib/events";
 import { checkInternalAuth } from "@/lib/internal/auth";
-import { getPrimaryOwner } from "@/lib/scheduler/queries";
+import { getPrimaryOwner } from "@/lib/owner/primary";
 
 const schema = z.object({
   status: z.enum(["SENT", "FAILED"]),
