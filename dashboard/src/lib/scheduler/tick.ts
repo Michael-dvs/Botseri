@@ -11,6 +11,8 @@ import {
   getActiveRows,
   getPrimaryOwner,
   mapActiveRows,
+  processExpiredAlarms,
+  recoverStaleTaskClaims,
   type PromptTodo,
 } from "@/lib/scheduler/queries";
 import { computeDailyStats, type DailyStats } from "@/lib/stats";
@@ -48,6 +50,7 @@ type FallbackBriefInput = {
   rest: PromptTodo[];
   upcoming: PromptTodo[];
   events: CalendarEventSummary[];
+  expiredAlarms?: string[];
 };
 
 export function isMinuteInWindow(now: number, start: number, duration: number): boolean {
@@ -69,6 +72,10 @@ export function fallbackBrief(input: FallbackBriefInput): string {
   lines.push("", "🗓 Agenda hari ini:");
   if (input.events.length === 0) lines.push("• Tidak ada agenda kalender yang tersedia.");
   else input.events.slice(0, 5).forEach((event) => lines.push(`• ${event.title}${event.all_day ? " (sepanjang hari)" : ""}`));
+  if (input.expiredAlarms && input.expiredAlarms.length > 0) {
+    lines.push("", "⚠️ Pengingat terlewat:");
+    input.expiredAlarms.slice(0, 5).forEach((title) => lines.push(`• ${title}`));
+  }
   return lines.join("\n");
 }
 
@@ -196,11 +203,21 @@ async function buildBrief(
   chatId: string,
   now: Date,
 ): Promise<SchedulerJob> {
-  const [todayRows, upcomingRows, highPriorityRows] = await Promise.all([
+  const [todayRows, upcomingRows, highPriorityRows, expiredRows] = await Promise.all([
     getActiveRows(settings.timezone, "TODAY", 50),
     getActiveRows(settings.timezone, "UPCOMING", 10),
     getActiveRows(settings.timezone, "HIGH_PRIORITY", 10, settings.reminder_max_rank),
+    prisma.todo.findMany({
+      where: {
+        reminder_expired_at: {
+          gte: new Date(now.getTime() - 24 * 3600 * 1000),
+        },
+      },
+      select: { title: true },
+      take: 10,
+    }),
   ]);
+  const expiredAlarms = expiredRows.map((r) => r.title);
   let events: CalendarEventSummary[] = [];
   try {
     events = await listCalendarEventsToday(settings.timezone);
@@ -222,6 +239,7 @@ async function buildBrief(
     high_priority: highPriority,
     counts: { today: today.length, upcoming: upcoming.length },
     calendar_events_today: events,
+    expired_alarms: expiredAlarms,
   };
   return {
     job_id: jobId,
@@ -229,7 +247,7 @@ async function buildBrief(
     seq: 0,
     chat_id: chatId,
     messages: schedulerMessages(settings, "MORNING_BRIEF", now, data),
-    fallback_text: fallbackBrief({ focus, rest, upcoming, events }),
+    fallback_text: fallbackBrief({ focus, rest, upcoming, events, expiredAlarms }),
   };
 }
 
@@ -483,6 +501,12 @@ export async function tick(now: Date = new Date()): Promise<{ now_local: string;
   const today = localDateString(now, timezone);
   await isolatedHousekeeping("normalizeOverduePlannedDates", () => normalizeOverduePlannedDates(today));
   await isolatedHousekeeping("recoverStaleClaims", () => recoverStaleClaims(now));
+  await isolatedHousekeeping("recoverStaleTaskClaims", async () => {
+    await recoverStaleTaskClaims(now);
+  });
+  await isolatedHousekeeping("processExpiredAlarms", async () => {
+    await processExpiredAlarms(now);
+  });
   await isolatedHousekeeping("retryPendingGoogleSync", () => retryPendingGoogleSync(20));
   await isolatedHousekeeping("checkWahaSession", () => checkWahaSession(now));
   await isolatedHousekeeping("warnShortWindows", () => warnShortWindows(settings, now));

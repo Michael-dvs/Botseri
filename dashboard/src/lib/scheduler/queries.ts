@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { dateOnlyString, localDateString, localIsoString, localTimeString } from "@/lib/time";
+import { recordEvent } from "@/lib/events";
 
 export type ActiveTodoRow = {
   id: string;
@@ -125,6 +126,7 @@ export async function claimDueTaskAlarms(
       SELECT id FROM todos
       WHERE status = 'PENDING'
         AND has_specific_time = true
+        AND reminder_expired_at IS NULL
         AND (remind_at IS NOT NULL OR due_at IS NOT NULL)
         AND COALESCE(remind_at, due_at) <= ${now}
         AND COALESCE(remind_at, due_at) > (${now}::timestamptz - (${config.maxLatenessMinutes} * interval '1 minute'))
@@ -138,6 +140,77 @@ export async function claimDueTaskAlarms(
     )
     RETURNING id, title, due_at, remind_at, reminder_attempts;
   `);
+}
+
+/**
+ * Memproses alarm yang tertunda lebih dari 12 jam (max lateness).
+ * Alih-alih dibuang diam-diam, tandai reminder_expired_at dan catat event ALARM_EXPIRED.
+ */
+export async function processExpiredAlarms(
+  now: Date,
+  maxLatenessMinutes = DEFAULT_ALARM_CONFIG.maxLatenessMinutes,
+): Promise<number> {
+  const cutoff = new Date(now.getTime() - maxLatenessMinutes * 60_000);
+  const expiredTodos = await prisma.todo.findMany({
+    where: {
+      status: "PENDING",
+      has_specific_time: true,
+      reminder_expired_at: null,
+      reminded_at: null,
+      OR: [
+        { remind_at: { not: null, lte: cutoff } },
+        { remind_at: null, due_at: { not: null, lte: cutoff } },
+      ],
+    },
+    select: { id: true, title: true },
+    take: 50,
+  });
+
+  if (expiredTodos.length === 0) return 0;
+
+  const ids = expiredTodos.map((t) => t.id);
+  await prisma.todo.updateMany({
+    where: { id: { in: ids } },
+    data: { reminder_expired_at: now },
+  });
+
+  for (const t of expiredTodos) {
+    void recordEvent("WARN", "SCHEDULER", "ALARM_EXPIRED", {
+      todo_id: t.id,
+      title: t.title,
+      expired_at: now.toISOString(),
+    });
+  }
+
+  return expiredTodos.length;
+}
+
+/**
+ * Melepaskan klaim alarm yang menggantung lebih dari 5 menit tanpa selesai/gagal.
+ */
+export async function recoverStaleTaskClaims(
+  now: Date,
+  staleThresholdMinutes = 5,
+): Promise<number> {
+  const cutoff = new Date(now.getTime() - staleThresholdMinutes * 60_000);
+  const result = await prisma.todo.updateMany({
+    where: {
+      status: "PENDING",
+      reminder_claimed_at: { lt: cutoff },
+      reminded_at: null,
+    },
+    data: {
+      reminder_claimed_at: null,
+    },
+  });
+
+  if (result.count > 0) {
+    void recordEvent("WARN", "SCHEDULER", "STALE_TASK_CLAIMS_RECOVERED", {
+      count: result.count,
+    });
+  }
+
+  return result.count;
 }
 
 export function sanitizeTitleForWhatsapp(rawTitle: string): string {

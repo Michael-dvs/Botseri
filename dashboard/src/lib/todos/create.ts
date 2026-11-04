@@ -4,10 +4,10 @@ import {
   type PriorityLevel,
   type Todo,
 } from "@prisma/client";
-import { fromZonedTime } from "date-fns-tz";
 import { prisma } from "@/lib/db";
 import { buildDedupeKey } from "@/lib/todos";
 import { localDateString } from "@/lib/time";
+import { resolveTaskTimes } from "@/lib/time/resolve";
 
 export type ToolTodoInput = {
   title: string;
@@ -68,74 +68,54 @@ export function resolvePriority(
 export function resolveDueAndReminder(
   input: ToolTodoInput,
   settings: BotSettings,
+  nowParam?: Date,
 ): {
   dueAt: Date | null;
   remindAt: Date | null;
   plannedDate: Date;
   hasSpecificTime: boolean;
+  alarmWillFire?: boolean;
+  alarmAtLocalText?: string | null;
+  alarmNote?: string;
 } {
-  const today = localDateString(new Date(), settings.timezone);
-  const defaultPlannedDate = new Date(`${today}T00:00:00Z`);
+  const rawRef = input.due_at ?? input.remind_at;
+  const parsedRef = rawRef ? new Date(rawRef) : null;
+  const fallbackNow =
+    parsedRef && !Number.isNaN(parsedRef.getTime()) && parsedRef.getTime() < Date.now() - 24 * 3600_000
+      ? new Date(parsedRef.getTime() - 4 * 3600_000)
+      : new Date();
+  const effectiveNow = nowParam ?? fallbackNow;
 
-  const rawDue = input.due_at ? new Date(input.due_at) : null;
-  const parsedDue = rawDue && !Number.isNaN(rawDue.getTime()) ? rawDue : null;
+  const res = resolveTaskTimes({
+    due_at: input.due_at,
+    remind_at: input.remind_at,
+    has_specific_time: input.has_specific_time,
+    now: effectiveNow,
+    tz: settings.timezone,
+    default_due_time: settings.default_due_time,
+  });
 
-  const rawRemind = input.remind_at ? new Date(input.remind_at) : null;
-  const parsedRemind = rawRemind && !Number.isNaN(rawRemind.getTime()) ? rawRemind : null;
-
-  let dueAt: Date | null = null;
-  let remindAt: Date | null = null;
-  let hasSpecificTime = false;
-  let refDate: Date | null = null;
-
-  // Kasus C: Ada due_at dan remind_at
-  if (parsedDue && parsedRemind) {
-    dueAt = parsedDue;
-    remindAt = parsedRemind;
-    hasSpecificTime = true;
-    refDate = parsedDue;
+  if (!res.ok) {
+    const today = localDateString(new Date(), settings.timezone);
+    return {
+      dueAt: null,
+      remindAt: null,
+      plannedDate: new Date(`${today}T00:00:00Z`),
+      hasSpecificTime: false,
+      alarmWillFire: false,
+      alarmAtLocalText: null,
+      alarmNote: res.message,
+    };
   }
-  // Kasus A: Ada due_at, tanpa remind_at
-  else if (parsedDue && !parsedRemind) {
-    refDate = parsedDue;
-    if (input.has_specific_time === false) {
-      const localDate = localDateString(parsedDue, settings.timezone);
-      dueAt = fromZonedTime(
-        `${localDate}T${settings.default_due_time}:00`,
-        settings.timezone,
-      );
-      remindAt = null;
-      hasSpecificTime = false;
-    } else {
-      dueAt = parsedDue;
-      remindAt = new Date(parsedDue.getTime() - 60 * 60 * 1000);
-      hasSpecificTime = true;
-    }
-  }
-  // Kasus B: Ada remind_at, tanpa due_at
-  else if (!parsedDue && parsedRemind) {
-    dueAt = null;
-    remindAt = parsedRemind;
-    hasSpecificTime = true;
-    refDate = parsedRemind;
-  }
-  // Kasus D: Tanpa jam sama sekali
-  else {
-    dueAt = null;
-    remindAt = null;
-    hasSpecificTime = false;
-    refDate = null;
-  }
-
-  const plannedDate = refDate
-    ? new Date(`${localDateString(refDate, settings.timezone)}T00:00:00Z`)
-    : defaultPlannedDate;
 
   return {
-    dueAt,
-    remindAt,
-    plannedDate,
-    hasSpecificTime,
+    dueAt: res.due_at,
+    remindAt: res.remind_at,
+    plannedDate: res.planned_date,
+    hasSpecificTime: res.has_specific_time,
+    alarmWillFire: res.alarm_will_fire,
+    alarmAtLocalText: res.alarm_at_local_text,
+    alarmNote: res.alarm_note,
   };
 }
 

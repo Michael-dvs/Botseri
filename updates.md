@@ -1518,3 +1518,39 @@ Menerapkan validasi graf alur kerja tingkat server murni (`validateGraph`) untuk
   DROP INDEX IF EXISTS "pipeline_config_versions_version_idx";
   DROP TABLE IF EXISTS "pipeline_config_versions";
   ```
+
+## [2026-11-04] S07: Waktu dan Alarm: Server sebagai Penentu (P1)
+
+### 1. Ringkasan Perbaikan
+Menyatukan parsing waktu yang terfragmentasi ke dalam fasad tunggal kanonik `dashboard/src/lib/time/resolve.ts` (`resolveTaskTimes`) guna menegakkan aturan server (INV-03, INV-05). Mengimplementasikan tabel keputusan Kasus A secara deterministik ($R \ge 62$ menit $\to$ 60 menit sebelum tenggat, $12 \le R < 62$ menit $\to \lfloor R/2 \rfloor$ menit sebelum tenggat, $R < 12$ menit $\to$ alarm tepat saat tenggat tanpa pengingat otomatis). Menolak waktu lampau (`REMIND_AT_IN_PAST`), membatasi horizon maksimal 366 hari, menyelaraskan diskrepansi ekspresi vs ISO (`TIME_MISMATCH`), mengembalikan respons jujur (`alarm_will_fire`, `alarm_at_local_text`, `alarm_note`), menambahkan aturan prompt `R-KONFIRMASI-WAKTU`, dan mencegah alarm terbuang dengan kolom `todos.reminder_expired_at` serta pemulihan klaim basi scheduler > 5 menit.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/time/resolve.ts` | Baru | Fasad waktu tunggal kanonik `resolveTaskTimes`, batas Kasus A, validasi waktu lampau, horizon 366 hari, dan `parseFlexibleDueAt`. |
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan kolom `reminder_expired_at` pada model `Todo` beserta indeks status. |
+| `dashboard/prisma/migrations/20261104160000_add_reminder_expired_at_to_todos/migration.sql` | Baru | Migrasi SQL forward-only penambahan kolom `todos.reminder_expired_at`. |
+| `dashboard/src/lib/todos/create.ts` | Modifikasi | Delegasi `resolveDueAndReminder` ke `resolveTaskTimes` untuk eliminasi jalur parser ganda (A-06). |
+| `dashboard/src/app/api/internal/tools/create-todo-and-order/route.ts` | Modifikasi | Integrasi `resolveTaskTimes` dan penambahan respons transparan `alarm_will_fire`, `alarm_at_local_text`, `alarm_note`. |
+| `dashboard/src/app/api/internal/tools/update-todo/route.ts` | Modifikasi | Integrasi `resolveTaskTimes` dan penambahan respons transparan `alarm_will_fire`, `alarm_at_local_text`, `alarm_note`. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Penambahan aturan pagar pengaman prompt `R-KONFIRMASI-WAKTU`. |
+| `dashboard/src/lib/scheduler/queries.ts` | Modifikasi | Penambahan fungsi `processExpiredAlarms` (>12 jam), `recoverStaleTaskClaims` (>5 menit), dan filter `reminder_expired_at IS NULL`. |
+| `dashboard/src/lib/scheduler/tick.ts` | Modifikasi | Pemanggilan berkala `recoverStaleTaskClaims` dan `processExpiredAlarms` pada housekeeping serta penyajian pengingat terlewat di Morning Brief. |
+| `dashboard/tests/unit/time-resolve.test.ts` | Baru | Pengujian unit 11 skenario batas Kasus A, validasi lampau, horizon, diskrepansi waktu, batas tengah malam WIB, alarm kedaluwarsa, pemulihan klaim basi, dan idempotensi tick. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S07. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 39 test file, **377 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+5. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104160000_add_reminder_expired_at_to_todos` (penambahan kolom `todos.reminder_expired_at` dan indeks).
+- Rollback Migrasi:
+  ```sql
+  DROP INDEX IF EXISTS "todos_status_reminded_at_reminder_expired_at_idx";
+  ALTER TABLE "todos" DROP COLUMN IF EXISTS "reminder_expired_at";
+  ```

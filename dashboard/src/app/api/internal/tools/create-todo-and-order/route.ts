@@ -4,44 +4,13 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
-import { addDays, format } from "date-fns";
-import { fromZonedTime } from "date-fns-tz";
-import { formatDueAtLocalText, localDateString, localIsoString, normalizeIsoDateTime, resolveTimeExpression } from "@/lib/time";
+import { formatDueAtLocalText, localIsoString, normalizeIsoDateTime } from "@/lib/time";
+import { resolveTaskTimes } from "@/lib/time/resolve";
 import { syncTodo } from "@/lib/google/sync";
 import {
   createOrderForMessage,
   createTodoIdempotent,
 } from "@/lib/todos/create";
-
-function parseFlexibleDueAt(val: unknown, timezone: string): string | null {
-  if (val === null || val === undefined) return null;
-  const raw = String(val).trim();
-  if (!raw) return null;
-
-  const lower = raw.toLowerCase();
-  const isTomorrow = lower.includes("besok") || lower.includes("tomorrow");
-  const isDayAfter = lower.includes("lusa");
-  const isToday = lower.includes("hari ini") || lower.includes("today");
-
-  if (isTomorrow || isDayAfter || isToday) {
-    const now = new Date();
-    const todayStr = localDateString(now, timezone);
-    const anchor = new Date(`${todayStr}T00:00:00Z`);
-    const offsetDays = isTomorrow ? 1 : isDayAfter ? 2 : 0;
-    const targetDate = addDays(anchor, offsetDays);
-    const targetDateStr = format(targetDate, "yyyy-MM-dd");
-
-    let timeStr = "08:00:00";
-    if (lower.includes("siang")) timeStr = "12:00:00";
-    else if (lower.includes("sore")) timeStr = "15:00:00";
-    else if (lower.includes("malam")) timeStr = "19:00:00";
-
-    const utcDate = fromZonedTime(`${targetDateStr}T${timeStr}`, timezone);
-    return localIsoString(utcDate, timezone);
-  }
-
-  return normalizeIsoDateTime(raw, timezone);
-}
 
 function parseJsonSafe(val: unknown): unknown {
   if (typeof val === "string") {
@@ -159,7 +128,19 @@ export async function POST(request: Request) {
   }
 
   // 4. Coerce dan normalisasi setiap to-do item
-  const normalizedTodos = [];
+  type NormalizedTodoItem = {
+    title: string;
+    description: string | null;
+    category: string | null;
+    priority_rank: number;
+    due_at: string | null;
+    remind_at: string | null;
+    has_specific_time: boolean;
+    alarm_will_fire: boolean;
+    alarm_at_local_text: string | null;
+    alarm_note: string;
+  };
+  const normalizedTodos: NormalizedTodoItem[] = [];
   for (let i = 0; i < rawTodos.length; i++) {
     const item = (rawTodos[i] ?? {}) as Record<string, unknown>;
     const title = String(item.title ?? "").trim();
@@ -182,51 +163,27 @@ export async function POST(request: Request) {
       specificTime = item.has_specific_time.toLowerCase() === "true";
     }
 
-    // Coerce & normalize due_at and remind_at secara fleksibel
-    let normalizedDueAt: string | null = null;
-    let normalizedRemindAt: string | null = null;
+    const timeRes = resolveTaskTimes({
+      time_expression: (item.time_expression || item.daypart || item.time_kind) ? ((item.time_expression || item) as Record<string, unknown>) : null,
+      date_hint: typeof item.date_hint === "string" ? item.date_hint : null,
+      due_at: typeof item.due_at === "string" || item.due_at instanceof Date ? item.due_at : null,
+      remind_at: typeof item.remind_at === "string" || item.remind_at instanceof Date ? item.remind_at : null,
+      has_specific_time: specificTime || (Boolean(item.due_at || item.remind_at || item.time_expression || item.daypart || item.time_kind) && item.has_specific_time !== false),
+      is_reminder: Boolean(item.is_reminder),
+      now: new Date(),
+      tz: timezone,
+    });
 
-    if (item.remind_at !== undefined && item.remind_at !== null) {
-      try {
-        normalizedRemindAt = parseFlexibleDueAt(item.remind_at, timezone);
-        specificTime = true;
-        if (item.due_at === item.remind_at) {
-          item.due_at = null;
-        }
-      } catch (err) {
-        errorFields.push(`todos[${i}].remind_at`);
-        errorMessages.push(
-          `To-do #${i + 1} remind_at tidak valid: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-    if (item.due_at !== undefined && item.due_at !== null) {
-      try {
-        normalizedDueAt = parseFlexibleDueAt(item.due_at, timezone);
-        specificTime = true;
-      } catch (err) {
+    if (!timeRes.ok) {
+      if (timeRes.message.includes("due_at")) {
         errorFields.push(`todos[${i}].due_at`);
-        errorMessages.push(
-          `To-do #${i + 1} due_at tidak valid: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      } else if (timeRes.message.includes("remind_at")) {
+        errorFields.push(`todos[${i}].remind_at`);
+      } else {
+        errorFields.push(`todos[${i}].time`);
       }
-    }
-
-    if (item.time_expression || item.daypart || item.time_kind) {
-      const res = resolveTimeExpression(
-        new Date(),
-        timezone,
-        (item.time_expression || item) as Parameters<typeof resolveTimeExpression>[2],
-        typeof item.date_hint === "string" ? item.date_hint : null,
-      );
-      if (res.ok) {
-        if (item.is_reminder || item.remind_at !== undefined) {
-          normalizedRemindAt = res.due_at_iso;
-        } else {
-          normalizedDueAt = res.due_at_iso;
-        }
-        specificTime = true;
-      }
+      errorMessages.push(`To-do #${i + 1} waktu tidak valid: ${timeRes.message}`);
+      continue;
     }
 
     normalizedTodos.push({
@@ -234,9 +191,12 @@ export async function POST(request: Request) {
       description: item.description ? String(item.description).slice(0, 2000) : null,
       category: item.category ? String(item.category).slice(0, 40) : null,
       priority_rank: rank,
-      due_at: normalizedDueAt,
-      remind_at: normalizedRemindAt,
-      has_specific_time: specificTime,
+      due_at: timeRes.due_at_iso,
+      remind_at: timeRes.remind_at_iso,
+      has_specific_time: timeRes.has_specific_time,
+      alarm_will_fire: timeRes.alarm_will_fire,
+      alarm_at_local_text: timeRes.alarm_at_local_text,
+      alarm_note: timeRes.alarm_note,
     });
   }
 
@@ -390,41 +350,58 @@ export async function POST(request: Request) {
     byId[t.id] = t;
   }
 
+  const todoItems = created.map((item, idx) => {
+    const todo = byId[item.id] ?? item;
+    const priorityLabel =
+      "priority_level" in todo ? todo.priority_level?.label ?? null : null;
+    const norm = normalizedTodos[idx];
+    const alarmWillFire = norm?.alarm_will_fire ?? (todo.has_specific_time && Boolean(todo.remind_at || todo.due_at));
+    const alarmAtLocalText = norm?.alarm_at_local_text ?? (todo.remind_at
+      ? formatDueAtLocalText(todo.remind_at, settings.timezone)
+      : (todo.has_specific_time && todo.due_at ? formatDueAtLocalText(todo.due_at, settings.timezone) : null));
+    const alarmNote = norm?.alarm_note ?? (alarmWillFire ? "Pengingat disetel sesuai jadwal." : "Tenggat terlalu dekat atau tanpa jam spesifik.");
+
+    return {
+      id: todo.id,
+      title: todo.title,
+      priority_rank: todo.priority_rank,
+      priority_label: priorityLabel,
+      due_at: todo.due_at
+        ? localIsoString(todo.due_at, settings.timezone)
+        : null,
+      due_at_local_text: todo.due_at
+        ? formatDueAtLocalText(todo.due_at, settings.timezone)
+        : null,
+      remind_at: todo.remind_at
+        ? localIsoString(todo.remind_at, settings.timezone)
+        : null,
+      remind_at_local_text: todo.remind_at
+        ? formatDueAtLocalText(todo.remind_at, settings.timezone)
+        : null,
+      time_label: todo.due_at
+        ? `Tenggat: ${formatDueAtLocalText(todo.due_at, settings.timezone)}`
+        : todo.remind_at
+          ? `Pengingat: ${formatDueAtLocalText(todo.remind_at, settings.timezone)}`
+          : null,
+      needs_time: !todo.has_specific_time,
+      planned_date: todo.planned_date.toISOString().slice(0, 10),
+      google_sync_status: todo.google_sync_status,
+      deduplicated: item.deduplicated,
+      alarm_will_fire: alarmWillFire,
+      alarm_at_local_text: alarmAtLocalText,
+      alarm_note: alarmNote,
+    };
+  });
+
+  const firstTodoWithAlarm = todoItems.find((t) => t.alarm_will_fire);
+
   return NextResponse.json({
     ok: true,
     order_id: orderId,
-    todos: created.map((item) => {
-      const todo = byId[item.id] ?? item;
-      const priorityLabel =
-        "priority_level" in todo ? todo.priority_level?.label ?? null : null;
-      return {
-        id: todo.id,
-        title: todo.title,
-        priority_rank: todo.priority_rank,
-        priority_label: priorityLabel,
-        due_at: todo.due_at
-          ? localIsoString(todo.due_at, settings.timezone)
-          : null,
-        due_at_local_text: todo.due_at
-          ? formatDueAtLocalText(todo.due_at, settings.timezone)
-          : null,
-        remind_at: todo.remind_at
-          ? localIsoString(todo.remind_at, settings.timezone)
-          : null,
-        remind_at_local_text: todo.remind_at
-          ? formatDueAtLocalText(todo.remind_at, settings.timezone)
-          : null,
-        time_label: todo.due_at
-          ? `Tenggat: ${formatDueAtLocalText(todo.due_at, settings.timezone)}`
-          : todo.remind_at
-            ? `Pengingat: ${formatDueAtLocalText(todo.remind_at, settings.timezone)}`
-            : null,
-        needs_time: !todo.has_specific_time,
-        planned_date: todo.planned_date.toISOString().slice(0, 10),
-        google_sync_status: todo.google_sync_status,
-        deduplicated: item.deduplicated,
-      };
-    }),
+    todos: todoItems,
+    alarm_will_fire: todoItems.some((t) => t.alarm_will_fire),
+    alarm_at_local_text: firstTodoWithAlarm?.alarm_at_local_text ?? null,
+    alarm_note: firstTodoWithAlarm?.alarm_note ?? "Tenggat terlalu dekat atau tanpa jam spesifik.",
     warnings,
   });
 }

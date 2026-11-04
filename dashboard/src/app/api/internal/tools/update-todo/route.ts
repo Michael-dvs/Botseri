@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
-import { formatDueAtLocalText, localDateString, localIsoString, normalizeIsoDateTime, resolveTimeExpression } from "@/lib/time";
+import { formatDueAtLocalText, localIsoString, normalizeIsoDateTime, resolveTimeExpression } from "@/lib/time";
+import { resolveTaskTimes } from "@/lib/time/resolve";
 import { syncTodo } from "@/lib/google/sync";
 
 const schema = z.object({
@@ -128,28 +129,37 @@ export async function POST(request: Request) {
     );
   }
 
-  const dueAt =
-    input.due_at === undefined
-      ? todo.due_at
-      : input.due_at === null
-        ? null
-        : new Date(input.due_at);
+  // Resolusi waktu melalui fasad kanonik (S07)
+  const candidateDueAt = input.due_at === undefined ? todo.due_at : input.due_at;
+  const candidateRemindAt = input.remind_at === undefined ? todo.remind_at : input.remind_at;
+  const candidateSpecificTime = input.has_specific_time ?? todo.has_specific_time;
 
-  const remindAt =
-    input.remind_at === undefined
-      ? (input.due_at !== undefined && input.due_at !== null && todo.remind_at === null
-          ? new Date(new Date(input.due_at).getTime() - 60 * 60 * 1000)
-          : todo.remind_at)
-      : input.remind_at === null
-        ? null
-        : new Date(input.remind_at);
+  const timeRes = resolveTaskTimes({
+    due_at: candidateDueAt,
+    remind_at: candidateRemindAt,
+    has_specific_time: candidateSpecificTime,
+    now: new Date(),
+    tz: settings.timezone,
+    default_due_time: settings.default_due_time,
+  });
 
-  const refDate = dueAt ?? remindAt;
-  const plannedDate =
-    refDate === null
-      ? todo.planned_date
-      : new Date(`${localDateString(refDate, settings.timezone)}T00:00:00Z`);
+  if (!timeRes.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: {
+          code: timeRes.error,
+          message: timeRes.message,
+        },
+      },
+      { status: 422 },
+    );
+  }
 
+  const dueAt = timeRes.due_at;
+  const remindAt = timeRes.remind_at;
+  const plannedDate = timeRes.planned_date;
+  const hasSpecificTime = timeRes.has_specific_time;
   const updated = await prisma.todo.update({
     where: { id: todo.id },
     data: {
@@ -157,7 +167,7 @@ export async function POST(request: Request) {
       description: input.description,
       due_at: dueAt,
       remind_at: remindAt,
-      has_specific_time: input.has_specific_time ?? (dueAt !== null || remindAt !== null),
+      has_specific_time: hasSpecificTime,
       planned_date: plannedDate,
       priority_rank: level?.rank,
       priority_level_id: level?.id,
@@ -180,6 +190,9 @@ export async function POST(request: Request) {
   }
   return NextResponse.json({
     ok: true,
+    alarm_will_fire: timeRes.alarm_will_fire,
+    alarm_at_local_text: timeRes.alarm_at_local_text,
+    alarm_note: timeRes.alarm_note,
     todo: {
       id: updated.id,
       title: updated.title,
@@ -199,6 +212,9 @@ export async function POST(request: Request) {
       has_specific_time: updated.has_specific_time,
       priority_rank: updated.priority_rank,
       google_sync_status: updated.google_sync_status,
+      alarm_will_fire: timeRes.alarm_will_fire,
+      alarm_at_local_text: timeRes.alarm_at_local_text,
+      alarm_note: timeRes.alarm_note,
     },
   });
 }

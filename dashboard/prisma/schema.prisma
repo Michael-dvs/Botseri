@@ -204,6 +204,7 @@ model Todo {
   reminded_at          DateTime?        @db.Timestamptz
   reminder_claimed_at  DateTime?        @db.Timestamptz
   reminder_attempts    Int              @default(0)
+  reminder_expired_at  DateTime?        @db.Timestamptz
   created_at           DateTime         @default(now()) @db.Timestamptz
   updated_at           DateTime         @default(now()) @updatedAt @db.Timestamptz
 
@@ -215,6 +216,7 @@ model Todo {
   @@index([google_sync_status, google_sync_attempts])
   @@index([status, reminded_at, due_at])
   @@index([status, reminded_at, remind_at])
+  @@index([status, reminded_at, reminder_expired_at])
   @@map("todos")
 }
 
