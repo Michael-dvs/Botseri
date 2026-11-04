@@ -7,6 +7,7 @@ import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/db";
 import { recordEvent } from "@/lib/events";
 import { PRESETS, type PresetKey } from "@/lib/pipeline/presets";
+import { validateGraph } from "@/lib/pipeline/validate-graph";
 
 const resetSchema = z.object({
   preset_key: z.enum(["FLORIST_DECOR", "GENERIC_COMMERCE", "PERSONAL_ASSISTANT"]),
@@ -35,6 +36,20 @@ export async function POST(request: Request) {
     );
   }
 
+  // 1. Validasi Graf Preset (INV-16)
+  const validation = validateGraph(presetDef.config.graph);
+  if (!validation.valid) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Graf preset tidak lolos validasi keselamatan",
+        errors: validation.errors,
+        warnings: validation.warnings,
+      },
+      { status: 422 }
+    );
+  }
+
   const current = await prisma.pipelineConfig.findUnique({ where: { id: 1 } });
   const nextVersion = (current?.version || 1) + 1;
 
@@ -45,7 +60,7 @@ export async function POST(request: Request) {
       name: presetDef.name,
       preset_key: presetDef.key,
       config_json: presetDef.config as unknown as Prisma.InputJsonValue,
-      version: 1,
+      version: nextVersion,
     },
     update: {
       name: presetDef.name,
@@ -54,6 +69,27 @@ export async function POST(request: Request) {
       version: nextVersion,
     },
   });
+
+  // Simpan riwayat versi ke pipeline_config_versions
+  await prisma.pipelineConfigVersion.create({
+    data: {
+      version: nextVersion,
+      config_json: presetDef.config as unknown as Prisma.InputJsonValue,
+      actor: session.username || "owner",
+    },
+  });
+
+  // Bersihkan riwayat lama: simpan maksimal 20 versi terakhir
+  const oldVersions = await prisma.pipelineConfigVersion.findMany({
+    orderBy: { created_at: "desc" },
+    skip: 20,
+    select: { id: true },
+  });
+  if (oldVersions.length > 0) {
+    await prisma.pipelineConfigVersion.deleteMany({
+      where: { id: { in: oldVersions.map((v) => v.id) } },
+    });
+  }
 
   // Sync enable_orders with owner_assistant.enable_order_tools
   await prisma.botSettings.update({
@@ -66,6 +102,7 @@ export async function POST(request: Request) {
   await recordEvent("INFO", "pipeline", "PIPELINE_RESET", {
     version: updated.version,
     preset_key: presetDef.key,
+    actor: session.username,
   });
 
   return NextResponse.json({
@@ -77,5 +114,6 @@ export async function POST(request: Request) {
       version: updated.version,
       config: presetDef.config,
     },
+    warnings: validation.warnings,
   });
 }

@@ -1476,3 +1476,45 @@ Menerapkan perbaikan integritas relasi sesi pesanan, normalisasi nomor telepon, 
   DROP INDEX IF EXISTS "orders_customer_chat_id_status_idx";
   ALTER TABLE "orders" DROP COLUMN IF EXISTS "customer_chat_id";
   ```
+
+## [2026-11-04] S06: Validasi Graf Pipeline, SSOT, Kontrol Versi Optimistik, dan Pengamanan Sesi
+
+### 1. Ringkasan Perbaikan
+Menerapkan validasi graf alur kerja tingkat server murni (`validateGraph`) untuk mencegah siklus tanpa henti (DAG), port bercabang ganda, variabel template tidak sah, dan pelanggaran singleton trigger (INV-16). Menggantikan sumber data paralel dengan Single Source of Truth (SSOT) melalui fungsi proyeksi murni `projectCoreConfig`. Menambahkan kontrol versi optimistik (HTTP 409) pada penyimpanan alur kerja beserta riwayat versi (tabel `pipeline_config_versions`) dan pemulihan konfigurasi instan (`POST /api/pipeline/rollback`). Memulihkan sesi pelanggan dari pointer router usang (`PIPELINE_POINTER_STALE`) dan membatasi kedalaman rantai pesan maksimal 3 hop dengan runtime cycle guard (`PIPELINE_CYCLE_GUARD`).
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/pipeline/validate-graph.ts` | Baru | Validator server murni untuk graf alur kerja (siklus, port tunggal, singleton trigger, panjang teks, variabel template). |
+| `dashboard/src/lib/pipeline/projector.ts` | Baru | Fungsi proyeksi murni `projectCoreConfig` untuk menurunkan 6 kontainer konfigurasi inti secara dinamis dari graf visual (SSOT). |
+| `dashboard/src/app/api/pipeline/route.ts` | Modifikasi | Penegakan validasi graf (HTTP 422), kontrol versi optimistik (HTTP 409), pencatatan riwayat versi, dan pemangkasan versi lama (>20). |
+| `dashboard/src/app/api/pipeline/reset/route.ts` | Modifikasi | Validasi graf preset alur kerja sebelum reset dan pencatatan riwayat versi baru. |
+| `dashboard/src/app/api/pipeline/rollback/route.ts` | Baru | Endpoint pemulihan konfigurasi alur kerja historis berdasarkan nomor versi. |
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan model `PipelineConfigVersion` dan pemetaan ke tabel `pipeline_config_versions`. |
+| `dashboard/prisma/migrations/20261104140000_add_pipeline_config_versions/migration.sql` | Baru | Migrasi SQL forward-only untuk tabel `pipeline_config_versions`. |
+| `dashboard/src/lib/pipeline/manager.ts` | Modifikasi | Pembersihan heuristik string rapuh `drive.google.com`/`katalog` dan integrasi proyeksi SSOT `projectCoreConfig`. |
+| `dashboard/scripts/repair-pipeline-greeting.ts` & `scripts/repair-pipeline-greeting.ts` | Baru | Skrip idempoten satu kali untuk memperbaiki teks sapaan pipeline yang terkontaminasi. |
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Modifikasi | Penambahan runtime cycle guard dan batas kedalaman maksimal 3 hop pada `executeChainedCustomNodes` (`PIPELINE_CYCLE_GUARD`). |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Deteksi dan pemulihan pointer router basi ke router akar serta pencatatan `PIPELINE_POINTER_STALE`. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Indikator visual error merah pada node kanvas, pelacakan warning alur, tombol simpan dinonaktifkan saat error, dan modal riwayat versi / rollback. |
+| `dashboard/src/app/(app)/pipeline/page.tsx` | Modifikasi | Pengambilan riwayat versi awal untuk dimuat langsung di Studio Pipeline. |
+| `dashboard/tests/unit/pipeline-validation.test.ts` | Baru | Pengujian unit 9 aturan validasi graf server (siklus, port cabang ganda, panjang teks, template vars, dll). |
+| `dashboard/tests/unit/pipeline-route.test.ts` | Baru | Pengujian integrasi API route pipeline (HTTP 422 graf siklik/ganda, HTTP 409 versi usang, HTTP 200 rollback). |
+| `dashboard/tests/unit/pipeline-runtime.test.ts` | Baru | Pengujian runtime cycle guard, batas kedalaman 3 hop, pemulihan pointer router basi, dan proyeksi SSOT. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S06. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 38 test file, **366 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+5. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104140000_add_pipeline_config_versions` (pembuatan tabel `pipeline_config_versions` dan indeks versi).
+- Rollback Migrasi:
+  ```sql
+  DROP INDEX IF EXISTS "pipeline_config_versions_version_idx";
+  DROP TABLE IF EXISTS "pipeline_config_versions";
+  ```

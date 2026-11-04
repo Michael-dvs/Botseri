@@ -386,6 +386,17 @@ model PipelineConfig {
   @@map("pipeline_configs")
 }
 
+model PipelineConfigVersion {
+  id          String   @id @default(uuid()) @db.Uuid
+  version     Int
+  config_json Json     @db.JsonB
+  created_at  DateTime @default(now()) @db.Timestamptz()
+  actor       String?  @db.VarChar(100)
+
+  @@index([version])
+  @@map("pipeline_config_versions")
+}
+
 model PendingConfirmation {
   id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   owner_chat_id      String    @db.VarChar(100)

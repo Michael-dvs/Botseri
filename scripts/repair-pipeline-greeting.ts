@@ -1,0 +1,1 @@
+../dashboard/scripts/repair-pipeline-greeting.ts

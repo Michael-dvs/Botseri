@@ -26,6 +26,8 @@ import type {
   PipelineConfigData,
   PipelineNodeType,
   PipelineGraph,
+  PipelineGraphNode,
+  PipelineGraphEdge,
   OrderFormField,
 } from "@/lib/pipeline/schema";
 import type { ActivePipelineConfig } from "@/lib/pipeline/manager";
@@ -34,9 +36,10 @@ import { buildDefaultPresetGraph } from "@/lib/pipeline/presets";
 import { renderPipelineTemplate } from "@/lib/pipeline/manager";
 import { WhatsAppFormattedText } from "@/lib/pipeline/whatsapp-formatter";
 import {
-  syncGraphToCoreConfig,
   simulatePipelineExecution,
 } from "@/lib/pipeline/graph-runner";
+import { validateGraph, type ValidationError } from "@/lib/pipeline/validate-graph";
+import { projectCoreConfig } from "@/lib/pipeline/projector";
 import { PipelineDeletableEdge } from "./PipelineDeletableEdge";
 
 const PREVIEW_DUMMY_VARS = {
@@ -205,6 +208,8 @@ function PipelineNodeCard({ id, data, type, selected }: NodeProps) {
   const nodeData = data as CustomNodeData;
   const isEnabled = nodeData.enabled !== false;
   const isSimulated = nodeData.isSimulated === true;
+  const hasError = nodeData.hasError === true;
+  const errorMessage = typeof nodeData.errorMessage === "string" ? nodeData.errorMessage : undefined;
   const label = typeof nodeData.label === "string" ? nodeData.label : type;
 
   // Category & Header Theme
@@ -252,14 +257,17 @@ function PipelineNodeCard({ id, data, type, selected }: NodeProps) {
 
   return (
     <div
+      title={errorMessage}
       className={`relative min-w-[240px] max-w-[280px] rounded-lg border bg-[#fffdf8] text-xs shadow-sm cursor-pointer select-none transition-all ${
-        selected
-          ? "border-[#9a3412] ring-2 ring-[#9a3412] shadow-md"
-          : isSimulated
+        hasError
+          ? "border-rose-500 ring-2 ring-rose-500 shadow-md shadow-rose-500/20"
+          : selected
             ? "border-[#9a3412] ring-2 ring-[#9a3412] shadow-md"
-            : isEnabled
-              ? "border-[#d8d0c0] hover:border-[#9a3412]"
-              : "border-neutral-300 opacity-60"
+            : isSimulated
+              ? "border-[#9a3412] ring-2 ring-[#9a3412] shadow-md"
+              : isEnabled
+                ? "border-[#d8d0c0] hover:border-[#9a3412]"
+                : "border-neutral-300 opacity-60"
       }`}
     >
       {/* Target Handle (Input) on Left Border (No transform overrides, smooth ring hover) */}
@@ -276,7 +284,14 @@ function PipelineNodeCard({ id, data, type, selected }: NodeProps) {
 
       {/* Header */}
       <div className={`flex items-center justify-between rounded-t-lg px-3 py-1.5 font-mono text-[10px] uppercase font-bold tracking-wider ${headerBg}`}>
-        <span>{category}</span>
+        <div className="flex items-center gap-1.5">
+          <span>{category}</span>
+          {hasError && (
+            <span className="rounded bg-rose-600 px-1 py-0.5 text-[9px] font-bold text-white tracking-wider animate-pulse">
+              ERROR
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1.5">
           {isCustomNode && nodeData.onDeleteNode && (
             <button
@@ -605,17 +620,27 @@ const CATALOG_ITEMS: CatalogItem[] = [
   },
 ];
 
+export interface VersionItem {
+  id: string;
+  version: number;
+  created_at: Date | string;
+  actor: string | null;
+}
+
 export function PipelineStudio({
   initialPipeline,
   presets,
+  initialVersions = [],
 }: {
   initialPipeline: ActivePipelineConfig;
   presets: Record<PresetKey, PresetDefinition>;
+  initialVersions?: VersionItem[];
 }) {
   const router = useRouter();
   const [pipeline, setPipeline] = useState<ActivePipelineConfig>(initialPipeline);
   const [config, setConfig] = useState<PipelineConfigData>(initialPipeline.config);
-
+  const [versions, setVersions] = useState<VersionItem[]>(initialVersions);
+  const [showVersionsModal, setShowVersionsModal] = useState(false);
   const initialGraph: PipelineGraph = useMemo(() => {
     if (initialPipeline.config.graph && initialPipeline.config.graph.nodes.length > 0) {
       return initialPipeline.config.graph;
@@ -668,6 +693,56 @@ export function PipelineStudio({
   const [showAddModal, setShowAddModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  // Validation tracking (INV-16)
+  const currentGraph: PipelineGraph = useMemo(() => ({
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      type: n.type as PipelineNodeType,
+      position: n.position,
+      data: n.data as Record<string, unknown>,
+    })),
+    edges: edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourceHandle: e.sourceHandle ?? null,
+      targetHandle: e.targetHandle ?? null,
+      label: typeof e.label === "string" ? e.label : undefined,
+    })),
+  }), [nodes, edges]);
+
+  const validation = useMemo(() => validateGraph(currentGraph), [currentGraph]);
+
+  const errorNodeIdMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const err of validation.errors) {
+      if (err.nodeId) {
+        map.set(err.nodeId, err.message);
+      }
+    }
+    return map;
+  }, [validation.errors]);
+
+  useEffect(() => {
+    setNodes((nds) =>
+      nds.map((n) => {
+        const err = errorNodeIdMap.get(n.id);
+        const hasErr = Boolean(err);
+        if (n.data.hasError === hasErr && n.data.errorMessage === err) {
+          return n;
+        }
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            hasError: hasErr,
+            errorMessage: err,
+          },
+        };
+      })
+    );
+  }, [errorNodeIdMap, setNodes]);
 
   // Simulation state
   const [simRole, setSimRole] = useState<"CUSTOMER" | "OWNER">("CUSTOMER");
@@ -923,24 +998,7 @@ export function PipelineStudio({
 
   // Run simulation trace
   function handleRunSimulation() {
-    const currentGraph: PipelineGraph = {
-      nodes: nodes.map((n) => ({
-        id: n.id,
-        type: n.type as PipelineNodeType,
-        position: n.position,
-        data: n.data as Record<string, unknown>,
-      })),
-      edges: edges.map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        sourceHandle: e.sourceHandle ?? null,
-        targetHandle: e.targetHandle ?? null,
-        label: typeof e.label === "string" ? e.label : undefined,
-      })),
-    };
-
-    const synced = syncGraphToCoreConfig(currentGraph, config);
+    const synced = projectCoreConfig(currentGraph, config);
     const result = simulatePipelineExecution(synced, simInput, simState, simRole, simActiveRouterId);
 
     if (result.next_state === "AWAITING_CHOICE") {
@@ -983,28 +1041,19 @@ export function PipelineStudio({
 
   // Save pipeline configuration
   async function handleSavePipeline() {
+    if (!validation.valid) {
+      setMessage({
+        type: "error",
+        text: `Graf pipeline memiliki ${validation.errors.length} error. Perbaiki error sebelum menyimpan: ${validation.errors.map((e) => e.message).join("; ")}`,
+      });
+      return;
+    }
+
     setSaving(true);
     setMessage(null);
 
     try {
-      const currentGraph: PipelineGraph = {
-        nodes: nodes.map((n) => ({
-          id: n.id,
-          type: n.type as PipelineNodeType,
-          position: n.position,
-          data: n.data as Record<string, unknown>,
-        })),
-        edges: edges.map((e) => ({
-          id: e.id,
-          source: e.source,
-          target: e.target,
-          sourceHandle: e.sourceHandle ?? null,
-          targetHandle: e.targetHandle ?? null,
-          label: typeof e.label === "string" ? e.label : undefined,
-        })),
-      };
-
-      const finalConfig = syncGraphToCoreConfig(currentGraph, config);
+      const finalConfig = projectCoreConfig(currentGraph, config);
 
       const res = await fetch("/api/pipeline", {
         method: "PUT",
@@ -1012,17 +1061,36 @@ export function PipelineStudio({
         body: JSON.stringify({
           name: pipeline.name,
           preset_key: pipeline.preset_key,
+          expected_version: pipeline.version,
           config: finalConfig,
         }),
       });
 
       const data = await res.json();
+      if (res.status === 409) {
+        throw new Error(
+          data.error || "Konflik versi: Konfigurasi telah diubah oleh sesi lain. Silakan muat ulang halaman."
+        );
+      }
+      if (res.status === 422) {
+        const errorDetail = data.errors?.map((e: ValidationError) => e.message).join("; ") || data.error;
+        throw new Error(`Validasi graf gagal (422): ${errorDetail}`);
+      }
       if (!res.ok || !data.ok) {
         throw new Error(data.error || "Gagal menyimpan konfigurasi.");
       }
 
       setPipeline(data.pipeline);
       setConfig(data.pipeline.config);
+      setVersions((prev) => [
+        {
+          id: String(Date.now()),
+          version: data.pipeline.version,
+          created_at: new Date().toISOString(),
+          actor: "owner",
+        },
+        ...prev,
+      ]);
       setMessage({
         type: "success",
         text: `Pipeline berhasil disimpan dan aktif di runtime (versi ${data.pipeline.version}).`,
@@ -1032,6 +1100,76 @@ export function PipelineStudio({
       setMessage({
         type: "error",
         text: err instanceof Error ? err.message : "Terjadi kesalahan saat menyimpan pipeline.",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Rollback to historical version
+  async function handleRollback(versionNumber: number) {
+    if (!window.confirm(`Pulihkan pipeline ke versi ${versionNumber}? Konfigurasi aktif saat ini akan digantikan.`)) {
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/pipeline/rollback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: versionNumber }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Gagal memulihkan versi.");
+      }
+
+      setPipeline(data.pipeline);
+      setConfig(data.pipeline.config);
+
+      const newGraph =
+        data.pipeline.config.graph && data.pipeline.config.graph.nodes?.length > 0
+          ? data.pipeline.config.graph
+          : buildDefaultPresetGraph(data.pipeline.config);
+
+      setNodes(
+        newGraph.nodes.map((n: PipelineGraphNode) => ({
+          id: n.id,
+          type: n.type,
+          position: n.position,
+          data: {
+            ...n.data,
+            onDeleteNode: (delId: string) => handleDeleteNode(delId),
+          },
+        }))
+      );
+      setEdges(
+        newGraph.edges.map((e: PipelineGraphEdge) => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          sourceHandle: e.sourceHandle ?? undefined,
+          targetHandle: e.targetHandle ?? undefined,
+          label: e.label,
+          type: "smoothstep",
+          style: { stroke: "#78716c", strokeWidth: 2 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: "#78716c" },
+          data: {
+            onDelete: (edgeId: string) => handleDeleteEdge(edgeId),
+          },
+        }))
+      );
+
+      setMessage({
+        type: "success",
+        text: data.message || `Pipeline berhasil dipulihkan ke versi ${versionNumber}.`,
+      });
+      setShowVersionsModal(false);
+      router.refresh();
+    } catch (err) {
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Terjadi kesalahan saat rollback pipeline.",
       });
     } finally {
       setSaving(false);
@@ -1165,11 +1303,25 @@ export function PipelineStudio({
 
           <button
             type="button"
-            onClick={handleSavePipeline}
+            onClick={() => setShowVersionsModal(true)}
             disabled={saving}
-            className="btn btn-primary min-h-11 px-5 text-xs font-bold cursor-pointer"
+            className="btn btn-outline min-h-11 px-3 text-xs font-semibold cursor-pointer"
           >
-            {saving ? "Menyimpan..." : "Simpan & Terapkan"}
+            Riwayat Versi (v{pipeline.version})
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSavePipeline}
+            disabled={saving || !validation.valid}
+            className={`btn min-h-11 px-5 text-xs font-bold cursor-pointer ${
+              !validation.valid
+                ? "bg-stone-300 text-stone-500 cursor-not-allowed border-stone-300"
+                : "btn-primary"
+            }`}
+            title={!validation.valid ? `Ada ${validation.errors.length} error validasi graf` : undefined}
+          >
+            {saving ? "Menyimpan..." : !validation.valid ? `Simpan (${validation.errors.length} Error)` : "Simpan & Terapkan"}
           </button>
         </div>
       </header>
@@ -1185,6 +1337,20 @@ export function PipelineStudio({
           }`}
         >
           {message.text}
+        </div>
+      )}
+      {/* Validation Banners */}
+      {validation.warnings.length > 0 && (
+        <div className="rounded border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-900">
+          <strong>Peringatan Alur ({validation.warnings.length}):</strong>{" "}
+          {validation.warnings.map((w) => w.message).join(" · ")}
+        </div>
+      )}
+
+      {validation.errors.length > 0 && (
+        <div className="rounded border border-rose-300 bg-rose-50 px-4 py-2.5 text-xs text-rose-900">
+          <strong>Error Graf ({validation.errors.length}):</strong>{" "}
+          {validation.errors.map((e) => e.message).join(" · ")}
         </div>
       )}
 
@@ -1941,6 +2107,67 @@ export function PipelineStudio({
                   </button>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Version History Modal */}
+      {showVersionsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-lg rounded-xl border border-[#d8d0c0] bg-[#fffdf8] p-5 shadow-2xl max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-[#d8d0c0] pb-3">
+              <h3 className="text-sm font-bold text-stone-900">Riwayat Versi Pipeline</h3>
+              <button
+                type="button"
+                onClick={() => setShowVersionsModal(false)}
+                className="text-stone-400 hover:text-stone-700 text-sm font-bold cursor-pointer"
+              >
+                x
+              </button>
+            </div>
+
+            <div className="mt-3 flex-1 overflow-y-auto divide-y divide-stone-200 pr-1">
+              {versions.length === 0 ? (
+                <p className="py-4 text-center text-xs text-stone-500">Belum ada riwayat versi tersimpan.</p>
+              ) : (
+                versions.map((ver) => (
+                  <div key={ver.id || ver.version} className="flex items-center justify-between py-2.5">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-bold text-stone-900">Versi {ver.version}</span>
+                        {ver.version === pipeline.version && (
+                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-800">
+                            Aktif
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-stone-500 mt-0.5">
+                        {new Date(ver.created_at).toLocaleString("id-ID")} {ver.actor ? `· oleh ${ver.actor}` : ""}
+                      </p>
+                    </div>
+                    {ver.version !== pipeline.version && (
+                      <button
+                        type="button"
+                        onClick={() => handleRollback(ver.version)}
+                        disabled={saving}
+                        className="btn btn-outline min-h-8 px-3 text-xs font-medium cursor-pointer"
+                      >
+                        Pulihkan
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="mt-4 flex justify-end border-t border-[#d8d0c0] pt-3">
+              <button
+                type="button"
+                onClick={() => setShowVersionsModal(false)}
+                className="btn btn-outline min-h-9 px-4 text-xs font-semibold cursor-pointer"
+              >
+                Tutup
+              </button>
             </div>
           </div>
         </div>

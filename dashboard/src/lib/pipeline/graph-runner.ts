@@ -3,9 +3,10 @@ import type {
   PipelineConfigData,
   PipelineGraph,
   PipelineGraphNode,
-  OrderFormField,
 } from "./schema";
 import { renderPipelineTemplate } from "./manager";
+import { recordEvent } from "@/lib/events";
+import { projectCoreConfig } from "./projector";
 import { looksLikeOrderForm, parseOrderForm } from "@/lib/customer/orderFormat";
 
 export interface CustomReplyPayload {
@@ -57,205 +58,7 @@ export function syncGraphToCoreConfig(
   graph: PipelineGraph,
   baseConfig: PipelineConfigData
 ): PipelineConfigData {
-  const synced: PipelineConfigData = JSON.parse(JSON.stringify(baseConfig));
-  synced.graph = graph;
-
-  // 1. Identify the root greeting node connected from TRIGGER_INBOUND via out_customer
-  const triggerNode =
-    graph.nodes.find((n) => n.type === "TRIGGER_INBOUND" || n.id === "node-trigger") ||
-    graph.nodes[0];
-
-  const greetingEdge = graph.edges.find(
-    (e) =>
-      (e.source === triggerNode?.id || e.source === "node-trigger") &&
-      (e.sourceHandle === "out_customer" || e.sourceHandle === "Pelanggan Baru" || !e.sourceHandle)
-  );
-
-  const rootGreetingNode = greetingEdge
-    ? graph.nodes.find((n) => n.id === greetingEdge.target)
-    : graph.nodes.find((n) => n.id === "node-greeting");
-
-  // Sync root greeting node to customer_greeting
-  if (rootGreetingNode && rootGreetingNode.data) {
-    const rawGreeting =
-      rootGreetingNode.data.greeting_text || rootGreetingNode.data.message_text;
-    if (typeof rawGreeting === "string" && rawGreeting.trim().length > 0) {
-      synced.customer_greeting.greeting_text = rawGreeting.trim();
-    }
-    if (typeof rootGreetingNode.data.enabled === "boolean") {
-      synced.customer_greeting.enabled = rootGreetingNode.data.enabled;
-    }
-  }
-
-  for (const node of graph.nodes) {
-    const data = node.data as Record<string, unknown>;
-
-    switch (node.type) {
-      case "TRIGGER_INBOUND": {
-        synced.inbound_gate = {
-          ...synced.inbound_gate,
-          enabled: typeof data.enabled === "boolean" ? data.enabled : synced.inbound_gate.enabled,
-          allow_unregistered_customers:
-            typeof data.allow_unregistered_customers === "boolean"
-              ? data.allow_unregistered_customers
-              : synced.inbound_gate.allow_unregistered_customers,
-          ignore_groups:
-            typeof data.ignore_groups === "boolean"
-              ? data.ignore_groups
-              : synced.inbound_gate.ignore_groups,
-          rate_limit_per_minute:
-            typeof data.rate_limit_per_minute === "number"
-              ? data.rate_limit_per_minute
-              : synced.inbound_gate.rate_limit_per_minute,
-          mute_bot_on_active_order:
-            typeof data.mute_bot_on_active_order === "boolean"
-              ? data.mute_bot_on_active_order
-              : synced.inbound_gate.mute_bot_on_active_order,
-          mute_max_hours:
-            typeof data.mute_max_hours === "number"
-              ? data.mute_max_hours
-              : synced.inbound_gate.mute_max_hours,
-        };
-        break;
-      }
-
-      case "MESSAGE_MENU": {
-        // ONLY sync if this is the root greeting node connected from trigger!
-        // DILARANG KERAS membiarkan node MESSAGE_MENU lain (seperti custom-message_menu-*) menimpa greeting_text!
-        if (node.id === rootGreetingNode?.id) {
-          synced.customer_greeting = {
-            ...synced.customer_greeting,
-            enabled: typeof data.enabled === "boolean" ? data.enabled : synced.customer_greeting.enabled,
-            greeting_text:
-              typeof data.message_text === "string" && data.message_text.trim().length > 0
-                ? data.message_text.trim()
-                : typeof data.greeting_text === "string" && data.greeting_text.trim().length > 0
-                  ? data.greeting_text.trim()
-                  : synced.customer_greeting.greeting_text,
-          };
-        }
-        break;
-      }
-
-      case "CONDITION_ROUTER": {
-        const branches = Array.isArray(data.branches)
-          ? (data.branches as Array<{ id: string; label: string; keywords: string[] }>)
-          : null;
-        let b1 = Array.isArray(data.branch_1_keywords) ? (data.branch_1_keywords as string[]) : null;
-        let b2 = Array.isArray(data.branch_2_keywords) ? (data.branch_2_keywords as string[]) : null;
-
-        if (branches) {
-          const foundB1 = branches.find((b) => b.id === "branch_1");
-          if (foundB1) b1 = foundB1.keywords;
-          const foundB2 = branches.find((b) => b.id === "branch_2");
-          if (foundB2) b2 = foundB2.keywords;
-        }
-
-        synced.customer_greeting = {
-          ...synced.customer_greeting,
-          order_trigger_keywords: b1 || synced.customer_greeting.order_trigger_keywords,
-          ask_trigger_keywords: b2 || synced.customer_greeting.ask_trigger_keywords,
-          unrecognized_choice_text:
-            typeof data.fallback_reply_text === "string"
-              ? data.fallback_reply_text
-              : synced.customer_greeting.unrecognized_choice_text,
-        };
-        break;
-      }
-
-      case "ORDER_FORM_PROCESSOR": {
-        synced.order_form = {
-          ...synced.order_form,
-          enabled: typeof data.enabled === "boolean" ? data.enabled : synced.order_form.enabled,
-          form_template_text:
-            typeof data.form_template_text === "string"
-              ? data.form_template_text
-              : synced.order_form.form_template_text,
-          required_fields: Array.isArray(data.required_fields)
-            ? (data.required_fields as OrderFormField[])
-            : synced.order_form.required_fields,
-          missing_fields_prefix:
-            typeof data.missing_fields_prefix === "string"
-              ? data.missing_fields_prefix
-              : synced.order_form.missing_fields_prefix,
-          enable_llm_fallback:
-            typeof data.enable_llm_fallback === "boolean"
-              ? data.enable_llm_fallback
-              : synced.order_form.enable_llm_fallback,
-        };
-        break;
-      }
-
-      case "CS_HANDOVER": {
-        synced.cs_handover = {
-          ...synced.cs_handover,
-          enabled: typeof data.enabled === "boolean" ? data.enabled : synced.cs_handover.enabled,
-          handover_customer_text:
-            typeof data.handover_customer_text === "string"
-              ? data.handover_customer_text
-              : synced.cs_handover.handover_customer_text,
-          pause_ttl_hours:
-            typeof data.pause_ttl_hours === "number"
-              ? data.pause_ttl_hours
-              : synced.cs_handover.pause_ttl_hours,
-          notify_owner:
-            typeof data.notify_owner === "boolean"
-              ? data.notify_owner
-              : synced.cs_handover.notify_owner,
-          owner_handover_alert_template:
-            typeof data.owner_handover_alert_template === "string"
-              ? data.owner_handover_alert_template
-              : synced.cs_handover.owner_handover_alert_template,
-        };
-        break;
-      }
-
-      case "ORDER_FULFILLMENT": {
-        synced.order_confirmation = {
-          ...synced.order_confirmation,
-          enabled: typeof data.enabled === "boolean" ? data.enabled : synced.order_confirmation.enabled,
-          customer_confirmation_template:
-            typeof data.customer_confirmation_template === "string"
-              ? data.customer_confirmation_template
-              : synced.order_confirmation.customer_confirmation_template,
-          notify_owner_on_new_order:
-            typeof data.notify_owner_on_new_order === "boolean"
-              ? data.notify_owner_on_new_order
-              : synced.order_confirmation.notify_owner_on_new_order,
-          owner_new_order_alert_template:
-            typeof data.owner_new_order_alert_template === "string"
-              ? data.owner_new_order_alert_template
-              : synced.order_confirmation.owner_new_order_alert_template,
-        };
-        break;
-      }
-
-      case "OWNER_AI_AGENT": {
-        synced.owner_assistant = {
-          ...synced.owner_assistant,
-          enabled: typeof data.enabled === "boolean" ? data.enabled : synced.owner_assistant.enabled,
-          enable_todo_tools:
-            typeof data.enable_todo_tools === "boolean"
-              ? data.enable_todo_tools
-              : synced.owner_assistant.enable_todo_tools,
-          enable_order_tools:
-            typeof data.enable_order_tools === "boolean"
-              ? data.enable_order_tools
-              : synced.owner_assistant.enable_order_tools,
-          enable_voice_note_stt:
-            typeof data.enable_voice_note_stt === "boolean"
-              ? data.enable_voice_note_stt
-              : synced.owner_assistant.enable_voice_note_stt,
-        };
-        break;
-      }
-
-      default:
-        break;
-    }
-  }
-
-  return synced;
+  return projectCoreConfig(graph, baseConfig);
 }
 
 /**
@@ -266,7 +69,9 @@ export function executeChainedCustomNodes(
   startNodeId: string,
   sourceHandle: string | null,
   graph: PipelineGraph | undefined,
-  contextVars: Record<string, string>
+  contextVars: Record<string, string>,
+  maxDepth = 3,
+  visitedNodeIds: Set<string> = new Set<string>()
 ): CustomReplyPayload[] {
   if (!graph || !graph.edges || !graph.nodes) return [];
 
@@ -277,10 +82,17 @@ export function executeChainedCustomNodes(
 
   let currentSourceId = startNodeId;
   let currentHandle = sourceHandle;
-  const visited = new Set<string>();
+  visitedNodeIds.add(startNodeId);
 
-  while (currentSourceId && !visited.has(currentSourceId)) {
-    visited.add(currentSourceId);
+  while (currentSourceId) {
+    if (replies.length >= maxDepth) {
+      void recordEvent("WARN", "pipeline_runtime", "PIPELINE_CYCLE_GUARD", {
+        start_node_id: startNodeId,
+        max_depth: maxDepth,
+        reason: "CHAIN_DEPTH_EXCEEDED",
+      });
+      break;
+    }
 
     // Find outgoing edges from current node
     const matchingEdges = graph.edges.filter((e) => {
@@ -302,6 +114,17 @@ export function executeChainedCustomNodes(
 
     const targetNode = nodeMap.get(nextEdge.target);
     if (!targetNode) break;
+
+    // Cycle Guard: cegah kunjungan simpul berulang saat runtime
+    if (visitedNodeIds.has(targetNode.id)) {
+      void recordEvent("WARN", "pipeline_runtime", "PIPELINE_CYCLE_GUARD", {
+        start_node_id: startNodeId,
+        cycle_node_id: targetNode.id,
+        reason: "CYCLE_DETECTED",
+      });
+      break;
+    }
+    visitedNodeIds.add(targetNode.id);
 
     if (targetNode.type === "CUSTOM_WA_REPLY" || targetNode.type === "MESSAGE_MENU") {
       const data = targetNode.data as Record<string, unknown>;

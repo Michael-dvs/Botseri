@@ -3,6 +3,7 @@ import { z } from "zod";
 import { OrderPaymentStatus, type CustomerSessionState, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
+import { recordEvent } from "@/lib/events";
 import { chatCompletion } from "@/lib/llm-gateway";
 import { parseChoice } from "@/lib/customer/choice";
 import { toChatId } from "@/lib/customer/phone";
@@ -208,14 +209,20 @@ export async function POST(request: Request) {
     if (session.state === "AWAITING_CHOICE" && pipeline.config.graph?.edges && pipeline.config.graph?.nodes) {
       const activeRouterId = (meta.current_router_id as string | undefined) || undefined;
       let routerNode: PipelineGraphNode | undefined = undefined;
+      let isStalePointer = false;
 
       if (activeRouterId) {
-        routerNode = pipeline.config.graph.nodes.find((n) => n.id === activeRouterId);
+        const found = pipeline.config.graph.nodes.find((n) => n.id === activeRouterId);
+        if (found && found.type === "CONDITION_ROUTER") {
+          routerNode = found;
+        } else {
+          isStalePointer = true;
+        }
       }
 
       if (!routerNode) {
         const greetingEdge = pipeline.config.graph.edges.find(
-          (e) => e.source === "node-greeting" && (e.sourceHandle === "out_next" || !e.sourceHandle)
+          (e) => (e.source === "node-greeting" || e.source.includes("greeting")) && (e.sourceHandle === "out_next" || !e.sourceHandle)
         );
         if (greetingEdge) {
           routerNode = pipeline.config.graph.nodes.find(
@@ -230,6 +237,22 @@ export async function POST(request: Request) {
         );
       }
 
+      if (isStalePointer && activeRouterId) {
+        await recordEvent("WARN", "customer_session", "PIPELINE_POINTER_STALE", {
+          phone_e164: session.phone_e164,
+          stale_router_id: activeRouterId,
+          fallback_router_id: routerNode?.id || null,
+        });
+
+        // Reset pointer mati dari metadata sesi di database dan memori lokal
+        delete meta.current_router_id;
+        await prisma.customerSession.update({
+          where: { id: session.id },
+          data: {
+            metadata: meta as unknown as Prisma.InputJsonValue,
+          },
+        });
+      }
       const routerId = routerNode?.id || "node-router";
       const routerData = (routerNode?.data as Record<string, unknown>) || {};
       const branches = Array.isArray(routerData.branches)

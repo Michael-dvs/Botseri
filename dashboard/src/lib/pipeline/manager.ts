@@ -5,6 +5,7 @@ import {
   type PipelineConfigData,
 } from "./schema";
 import { FLORIST_DECOR_PRESET, type PresetKey } from "./presets";
+import { projectCoreConfig } from "./projector";
 
 export interface ActivePipelineConfig {
   id: number;
@@ -61,63 +62,19 @@ export async function getActivePipelineConfig(): Promise<ActivePipelineConfig> {
     }
 
     // Safely parse JSON with fallback to defaults for forward-compatibility
-    let parsedConfig = PipelineConfigSchema.parse(row.config_json);
+    const rawParsed = PipelineConfigSchema.parse(row.config_json);
 
-    // Auto-Heal (Section C): Periksa jika customer_greeting.greeting_text saat ini terlanjur tertimpa
-    // kata "katalog" atau link "drive.google.com" / "google.drive.com" dari kontainer sub-menu
-    const currentGreeting = (parsedConfig.customer_greeting?.greeting_text || "").toLowerCase();
-    const isContaminated =
-      currentGreeting.includes("katalog") ||
-      currentGreeting.includes("drive.google.com") ||
-      currentGreeting.includes("google.drive.com");
-
-    if (isContaminated) {
-      let restoredGreeting = FLORIST_DECOR_PRESET.customer_greeting.greeting_text;
-
-      // Cek apakah node-greeting di graph masih memiliki teks selamat datang yang autentik
-      if (parsedConfig.graph?.nodes) {
-        const rootGreetingNode = parsedConfig.graph.nodes.find((n) => n.id === "node-greeting");
-        const nodeText = String(
-          rootGreetingNode?.data?.greeting_text || rootGreetingNode?.data?.message_text || ""
-        );
-        if (
-          nodeText.trim().length > 0 &&
-          !nodeText.toLowerCase().includes("katalog") &&
-          !nodeText.toLowerCase().includes("drive.google.com")
-        ) {
-          restoredGreeting = nodeText.trim();
-        } else if (rootGreetingNode && rootGreetingNode.data) {
-          rootGreetingNode.data.greeting_text = restoredGreeting;
-          rootGreetingNode.data.message_text = restoredGreeting;
-        }
-      }
-
-      parsedConfig = {
-        ...parsedConfig,
-        customer_greeting: {
-          ...parsedConfig.customer_greeting,
-          greeting_text: restoredGreeting,
-        },
-      };
-
-      try {
-        await prisma.pipelineConfig.update({
-          where: { id: row.id },
-          data: {
-            config_json: parsedConfig as unknown as Prisma.InputJsonValue,
-          },
-        });
-      } catch {
-        // Continue gracefully if DB update fails in unit test mock
-      }
-    }
+    // Single Source of Truth (SSOT): Turunkan 6 kontainer inti secara dinamis dari graf visual
+    const projectedConfig = rawParsed.graph?.nodes?.length
+      ? projectCoreConfig(rawParsed.graph, rawParsed)
+      : rawParsed;
 
     return {
       id: row.id,
       name: row.name,
       preset_key: row.preset_key as PresetKey,
       version: row.version,
-      config: parsedConfig,
+      config: projectedConfig,
     };
   } catch {
     return {

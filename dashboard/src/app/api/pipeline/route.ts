@@ -9,10 +9,12 @@ import { recordEvent } from "@/lib/events";
 import { PipelineConfigSchema } from "@/lib/pipeline/schema";
 import { PRESETS } from "@/lib/pipeline/presets";
 import { getActivePipelineConfig } from "@/lib/pipeline/manager";
+import { validateGraph } from "@/lib/pipeline/validate-graph";
 
 const putSchema = z.object({
   name: z.string().trim().min(1).max(150).optional(),
   preset_key: z.enum(["FLORIST_DECOR", "GENERIC_COMMERCE", "PERSONAL_ASSISTANT"]).optional(),
+  expected_version: z.number().int().min(1),
   config: PipelineConfigSchema,
 });
 
@@ -24,10 +26,22 @@ export async function GET() {
 
   const activePipeline = await getActivePipelineConfig();
 
+  const versions = await prisma.pipelineConfigVersion.findMany({
+    orderBy: { version: "desc" },
+    take: 20,
+    select: {
+      id: true,
+      version: true,
+      created_at: true,
+      actor: true,
+    },
+  });
+
   return NextResponse.json({
     ok: true,
     pipeline: activePipeline,
     presets: PRESETS,
+    versions,
   });
 }
 
@@ -46,9 +60,36 @@ export async function PUT(request: Request) {
     );
   }
 
-  const { name, preset_key, config } = parsed.data;
+  const { name, preset_key, expected_version, config } = parsed.data;
 
+  // 1. Validasi Graf Pipeline (INV-16)
+  const validation = validateGraph(config.graph);
+  if (!validation.valid) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Graf pipeline tidak valid",
+        errors: validation.errors,
+        warnings: validation.warnings,
+      },
+      { status: 422 }
+    );
+  }
+
+  // 2. Kontrol Versi Optimistik
   const current = await prisma.pipelineConfig.findUnique({ where: { id: 1 } });
+  if (current && current.version !== expected_version) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Konflik versi pipeline. Konfigurasi telah diubah oleh sesi lain. Silakan muat ulang halaman.",
+        current_version: current.version,
+        expected_version: expected_version,
+      },
+      { status: 409 }
+    );
+  }
+
   const nextVersion = (current?.version || 1) + 1;
 
   const updated = await prisma.pipelineConfig.upsert({
@@ -58,7 +99,7 @@ export async function PUT(request: Request) {
       name: name || "Pipeline Operasional Berseri",
       preset_key: preset_key || "FLORIST_DECOR",
       config_json: config as unknown as Prisma.InputJsonValue,
-      version: 1,
+      version: nextVersion,
     },
     update: {
       name: name || current?.name,
@@ -67,6 +108,27 @@ export async function PUT(request: Request) {
       version: nextVersion,
     },
   });
+
+  // Simpan riwayat versi ke pipeline_config_versions
+  await prisma.pipelineConfigVersion.create({
+    data: {
+      version: nextVersion,
+      config_json: config as unknown as Prisma.InputJsonValue,
+      actor: session.username || "owner",
+    },
+  });
+
+  // Bersihkan riwayat lama: simpan maksimal 20 versi terakhir
+  const oldVersions = await prisma.pipelineConfigVersion.findMany({
+    orderBy: { created_at: "desc" },
+    skip: 20,
+    select: { id: true },
+  });
+  if (oldVersions.length > 0) {
+    await prisma.pipelineConfigVersion.deleteMany({
+      where: { id: { in: oldVersions.map((v) => v.id) } },
+    });
+  }
 
   // Sync enable_orders flag in bot_settings with owner_assistant.enable_order_tools
   if (config.owner_assistant?.enable_order_tools !== undefined) {
@@ -82,6 +144,7 @@ export async function PUT(request: Request) {
     version: updated.version,
     preset_key: updated.preset_key,
     name: updated.name,
+    actor: session.username,
   });
 
   return NextResponse.json({
@@ -93,5 +156,6 @@ export async function PUT(request: Request) {
       version: updated.version,
       config,
     },
+    warnings: validation.warnings,
   });
 }
