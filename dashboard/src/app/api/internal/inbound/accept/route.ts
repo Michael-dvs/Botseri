@@ -7,10 +7,11 @@ import { recordEvent } from "@/lib/events";
 import { PAIRING_PATTERN, pairingHash } from "@/lib/pairing";
 import { resolveSenderE164, isLidSender, getLidIdentifier } from "@/lib/phone";
 import { lookupLidContact } from "@/lib/waha/client";
-import { normalizePhoneE164, toChatId } from "@/lib/customer/phone";
+import { normalizePhoneE164 } from "@/lib/customer/phone";
 import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
 import { looksLikeOrderForm } from "@/lib/customer/orderFormat";
 import { getActivePipelineConfig } from "@/lib/pipeline/manager";
+import { getActiveOrderForCustomer } from "@/lib/orders/service";
 
 const customerRateLimitMap = new Map<string, number[]>();
 
@@ -596,23 +597,7 @@ export async function POST(request: Request) {
   customerRateLimitMap.set(validCustomerPhone, timestamps);
 
   // 7. Bot Mute Policy & Auto-Heal: Periksa pesanan aktif pelanggan via customer_chat_id & fallback
-  const activeOrder = await prisma.order.findFirst({
-    where: {
-      deleted_at: null,
-      status: {
-        in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS],
-      },
-      OR: [
-        { customer_chat_id: targetChatId },
-        { customer_chat_id: toChatId(validCustomerPhone) },
-        {
-          customer_chat_id: null,
-          customer_contact: { in: [validCustomerPhone, validCustomerPhone.replace(/^\+/, "")] },
-        },
-      ],
-    },
-    orderBy: { created_at: "desc" },
-  });
+  const activeOrder = await getActiveOrderForCustomer(targetChatId, validCustomerPhone);
 
   const trimmedCustomerBody = (input.body || "").trim();
   const isMenuBypass = /^(menu|baru)[.! ]*$/i.test(trimmedCustomerBody);

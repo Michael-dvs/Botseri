@@ -1,12 +1,12 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { OrderPaymentStatus, OrderStatus } from "@prisma/client";
+import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
-import { recordEvent } from "@/lib/events";
-import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
+import { completeOrder, markPayment, setOrderStatus, formatOperationalStatusText, formatPaymentStatusText } from "@/lib/orders/service";
+import { getPrimaryOwner } from "@/lib/owner/primary";
 const UpdateOrderSchema = z.object({
   order_id: z.string().trim().min(1),
   action: z.enum([
@@ -26,28 +26,10 @@ const UpdateOrderSchema = z.object({
 
 async function resolveOwnerChatId(reqOwnerChatId?: string | null): Promise<string> {
   if (reqOwnerChatId && reqOwnerChatId.trim()) return reqOwnerChatId.trim();
-  const primary = await prisma.authorizedNumber.findFirst({
-    where: { is_owner: true, is_primary: true },
-  });
-  if (primary?.chat_id) return primary.chat_id;
-  const anyOwner = await prisma.authorizedNumber.findFirst({
-    where: { is_owner: true },
-  });
-  return anyOwner?.chat_id || "6281234567890@c.us";
+  const primary = await getPrimaryOwner();
+  return primary?.chat_id || "6281234567890@c.us";
 }
 
-function formatPaymentStatusText(status: OrderPaymentStatus): string {
-  if (status === OrderPaymentStatus.PAID) return "Lunas";
-  if (status === OrderPaymentStatus.DP_PAID) return "Sudah DP";
-  return "Belum dibayar";
-}
-
-function formatOperationalStatusText(status: OrderStatus): string {
-  if (status === OrderStatus.COMPLETED) return "SELESAI dikerjakan/dikirim";
-  if (status === OrderStatus.IN_PROGRESS) return "SEDANG DIKERJAKAN";
-  if (status === OrderStatus.CANCELLED) return "DIBATALKAN";
-  return "MENUNGGU pengerjaan/pengiriman";
-}
 
 export async function POST(request: Request) {
   if (!authorizeInternal(request)) {
@@ -216,23 +198,7 @@ export async function POST(request: Request) {
   // Action: MARK_COMPLETED / COMPLETE
   if (action === "MARK_COMPLETED" || action === "COMPLETE") {
     const updatedNotes = notes ? (order.notes ? `${order.notes} | ${notes}` : notes) : order.notes;
-
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        status: OrderStatus.COMPLETED,
-        completed_at: new Date(),
-        notes: updatedNotes,
-      },
-    });
-    await unmuteCustomerSessionByOrder(order);
-    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
-      action: "MARK_COMPLETED",
-      order_id: order.id,
-      source_message_id: parsed.data.message_id || null,
-      affected_count: 1,
-    });
-
+    const updated = await completeOrder(order.id, { notes: updatedNotes, actor: "OWNER_TOOL" });
     const paymentText = formatPaymentStatusText(updated.payment_status);
     return NextResponse.json({
       ok: true,
@@ -243,18 +209,7 @@ export async function POST(request: Request) {
 
   // Action: MARK_PAID
   if (action === "MARK_PAID") {
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        payment_status: OrderPaymentStatus.PAID,
-      },
-    });
-    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
-      action: "MARK_PAID",
-      order_id: order.id,
-      source_message_id: parsed.data.message_id || null,
-      affected_count: 1,
-    });
+    const updated = await markPayment(order.id, OrderPaymentStatus.PAID, "OWNER_TOOL");
     const opText = formatOperationalStatusText(updated.status);
     return NextResponse.json({
       ok: true,
@@ -265,18 +220,7 @@ export async function POST(request: Request) {
 
   // Action: MARK_DP
   if (action === "MARK_DP") {
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        payment_status: OrderPaymentStatus.DP_PAID,
-      },
-    });
-    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
-      action: "MARK_DP",
-      order_id: order.id,
-      source_message_id: parsed.data.message_id || null,
-      affected_count: 1,
-    });
+    const updated = await markPayment(order.id, OrderPaymentStatus.DP_PAID, "OWNER_TOOL");
     const opText = formatOperationalStatusText(updated.status);
     return NextResponse.json({
       ok: true,
@@ -287,18 +231,7 @@ export async function POST(request: Request) {
 
   // Action: MARK_IN_PROGRESS
   if (action === "MARK_IN_PROGRESS") {
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        status: OrderStatus.IN_PROGRESS,
-      },
-    });
-    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
-      action: "MARK_IN_PROGRESS",
-      order_id: order.id,
-      source_message_id: parsed.data.message_id || null,
-      affected_count: 1,
-    });
+    const updated = await setOrderStatus(order.id, OrderStatus.IN_PROGRESS, "OWNER_TOOL");
     const paymentText = formatPaymentStatusText(updated.payment_status);
     return NextResponse.json({
       ok: true,
@@ -310,23 +243,7 @@ export async function POST(request: Request) {
   // Action: COMPLETE_AND_PAY
   if (action === "COMPLETE_AND_PAY") {
     const updatedNotes = notes ? (order.notes ? `${order.notes} | ${notes}` : notes) : order.notes;
-
-    await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        status: OrderStatus.COMPLETED,
-        completed_at: new Date(),
-        payment_status: OrderPaymentStatus.PAID,
-        notes: updatedNotes,
-      },
-    });
-    await unmuteCustomerSessionByOrder(order);
-    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
-      action: "COMPLETE_AND_PAY",
-      order_id: order.id,
-      source_message_id: parsed.data.message_id || null,
-      affected_count: 1,
-    });
+    await completeOrder(order.id, { pay: true, notes: updatedNotes, actor: "OWNER_TOOL" });
     return NextResponse.json({
       ok: true,
       action: "COMPLETE_AND_PAY",

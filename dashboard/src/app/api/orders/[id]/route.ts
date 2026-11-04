@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { log } from "@/lib/logger";
+import { softDeleteOrder } from "@/lib/orders/service";
 import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
 const uuidSchema = z.string().uuid();
 
@@ -158,15 +159,7 @@ export async function DELETE(
   }
 
   try {
-    const order = await prisma.order.update({
-      where: { id: params.id },
-      data: {
-        status: "CANCELLED",
-        deleted_at: new Date(),
-      },
-    });
-
-    await unmuteCustomerSessionByOrder(order);
+    await softDeleteOrder(params.id, "dashboard_user");
 
     return NextResponse.json({ ok: true });
   } catch (error) {
