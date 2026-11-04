@@ -31,9 +31,24 @@ vi.mock("@/lib/llm-gateway", () => {
       this.name = "ProviderError";
     }
   }
+  class MockOutputTruncatedError extends Error {
+    readonly status = 422;
+    constructor(readonly model: string) {
+      super("Jawaban terpotong");
+      this.name = "OutputTruncatedError";
+    }
+  }
   return {
     NoActiveLlmError: MockNoActiveLlmError,
     ProviderError: MockProviderError,
+    OutputTruncatedError: MockOutputTruncatedError,
+    getActiveConfig: vi.fn().mockResolvedValue({
+      id: "cfg-test",
+      provider: "OPENROUTER",
+      model: "test-model",
+      temperature: 0.3,
+      max_output_tokens: 1000,
+    }),
     chatCompletion: (...args: unknown[]) => chatCompletionMock(...args),
   };
 });
@@ -111,11 +126,13 @@ describe("POST /api/internal/llm/v1/chat/completions (Hardened Gateway)", () => 
       );
       expect(res.status).toBe(504);
       const data = await res.json();
-      expect(data.error).toEqual({
-        message: "Upstream provider timeout",
-        type: "timeout_error",
-        code: "upstream_timeout",
-      });
+      expect(data.error).toEqual(
+        expect.objectContaining({
+          message: "Upstream provider timeout",
+          type: "timeout_error",
+          code: "upstream_timeout",
+        }),
+      );
       expect(safeRecordUsageMock).toHaveBeenCalledWith(
         expect.objectContaining({
           success: false,
@@ -134,11 +151,13 @@ describe("POST /api/internal/llm/v1/chat/completions (Hardened Gateway)", () => 
       );
       expect(res.status).toBe(502);
       const data = await res.json();
-      expect(data.error).toEqual({
-        message: "Upstream 500 error",
-        type: "upstream_error",
-        code: "upstream_error",
-      });
+      expect(data.error).toEqual(
+        expect.objectContaining({
+          message: "Upstream 500 error",
+          type: "upstream_error",
+          code: "upstream_error",
+        }),
+      );
     });
   });
 

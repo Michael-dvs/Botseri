@@ -4,7 +4,9 @@ import { authorizeInternal } from "@/lib/internal/auth";
 import {
   NoActiveLlmError,
   ProviderError,
+  OutputTruncatedError,
   chatCompletion,
+  getActiveConfig,
 } from "@/lib/llm-gateway";
 import { safeRecordUsage } from "@/lib/llm-gateway/usage";
 import { log } from "@/lib/logger";
@@ -78,17 +80,30 @@ export async function POST(request: Request) {
     .slice(0, 100) ?? null;
 
   try {
+    const activeConfig = await getActiveConfig();
+    const effectiveTemperature = activeConfig.temperature ?? 0.3;
+    let effectiveMaxTokens = activeConfig.max_output_tokens ?? 1000;
+
+    const isThinkingModel =
+      activeConfig.provider === "GEMINI" &&
+      (activeConfig.model.includes("2.5") || activeConfig.model.toLowerCase().includes("thinking"));
+
+    if (isThinkingModel && effectiveMaxTokens < 4096) {
+      effectiveMaxTokens = 4096;
+    }
+
     const result = await chatCompletion(
       {
         messages: parsed.data.messages,
         tools: parsed.data.tools,
         tool_choice: parsed.data.tool_choice,
-        temperature: parsed.data.temperature,
-        max_tokens: parsed.data.max_tokens,
+        temperature: effectiveTemperature,
+        max_tokens: effectiveMaxTokens,
         frequency_penalty: parsed.data.frequency_penalty,
         presence_penalty: parsed.data.presence_penalty,
       },
       request.signal,
+      activeConfig,
     );
     await safeRecordUsage({
       config: result.config,
@@ -182,6 +197,19 @@ export async function POST(request: Request) {
     }
     return NextResponse.json(result.body);
   } catch (error) {
+    if (error instanceof OutputTruncatedError) {
+      return NextResponse.json(
+        {
+          error: {
+            message: error.message,
+            type: "invalid_request_error",
+            code: "TRUNCATED",
+            model: error.model,
+          },
+        },
+        { status: error.status },
+      );
+    }
     if (error instanceof NoActiveLlmError) {
       return NextResponse.json(
         {
@@ -213,7 +241,9 @@ export async function POST(request: Request) {
           error: {
             message: error.message,
             type: isTimeout ? "timeout_error" : "upstream_error",
-            code: isTimeout ? "upstream_timeout" : "upstream_error",
+            code: isTimeout ? "upstream_timeout" : (error.kind ?? "upstream_error"),
+            provider: error.provider,
+            model: error.config?.model,
           },
         },
         { status: error.status },
@@ -223,9 +253,10 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         error: {
+          code: "UPSTREAM",
           message: "Gateway gagal memproses permintaan",
-          type: "server_error",
-          code: "gateway_error",
+          provider: "GATEWAY",
+          model: "unknown",
         },
       },
       { status: 502 },

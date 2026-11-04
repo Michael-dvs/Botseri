@@ -43,51 +43,87 @@ export type GeminiPayload = {
   };
 };
 
-const FORBIDDEN_GEMINI_SCHEMA_KEYS: Record<string, true> = {
-  $schema: true,
-  additionalProperties: true,
-  title: true,
-  $id: true,
-  $comment: true,
-  definitions: true,
-  $defs: true,
+const ALLOWED_GEMINI_SCHEMA_KEYS: Record<string, true> = {
+  type: true,
+  description: true,
+  enum: true,
+  properties: true,
+  required: true,
+  items: true,
+  nullable: true,
+  minimum: true,
+  maximum: true,
+  minItems: true,
+  maxItems: true,
+  format: true,
 };
 
-export function cleanGeminiSchema(schema: unknown): Record<string, unknown> {
+export function cleanGeminiSchema(schema: unknown, rootDefs?: Record<string, unknown>): Record<string, unknown> {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
     return { type: "object", properties: {} };
   }
 
   const rawObj = schema as Record<string, unknown>;
+  const defs =
+    rootDefs ||
+    ((rawObj.$defs || rawObj.definitions) as Record<string, unknown> | undefined);
+
+  // Selesaikan $ref jika ada
+  if (typeof rawObj.$ref === "string") {
+    const refPath = rawObj.$ref;
+    const refKey = refPath.replace(/^#\/(\$defs|definitions)\//, "");
+    if (defs && defs[refKey] && typeof defs[refKey] === "object") {
+      return cleanGeminiSchema(defs[refKey], defs);
+    }
+  }
+
   const cleaned: Record<string, unknown> = {};
 
-  // Pastikan type default adalah "object" bila tidak ditentukan
-  if (!("type" in rawObj) || !rawObj.type) {
+  // Transformasi anyOf: [{ type: X }, { type: "null" }]
+  if (Array.isArray(rawObj.anyOf)) {
+    const nonNull = rawObj.anyOf.find((item) => {
+      if (item && typeof item === "object") {
+        return (item as Record<string, unknown>).type !== "null";
+      }
+      return false;
+    }) as Record<string, unknown> | undefined;
+
+    if (nonNull) {
+      const cleanedNonNull = cleanGeminiSchema(nonNull, defs);
+      Object.assign(cleaned, cleanedNonNull);
+      cleaned.nullable = true;
+    }
+  }
+
+  // Transformasi type: [X, "null"]
+  if (Array.isArray(rawObj.type)) {
+    const nonNullType = rawObj.type.find((t) => t !== "null");
+    cleaned.type = typeof nonNullType === "string" ? nonNullType : "string";
+    cleaned.nullable = true;
+  } else if (typeof rawObj.type === "string") {
+    cleaned.type = rawObj.type;
+  } else if (!cleaned.type) {
     cleaned.type = "object";
   }
 
   for (const [key, value] of Object.entries(rawObj)) {
-    // Lewati field yang tidak didukung oleh Gemini FunctionDeclaration Schema
-    if (FORBIDDEN_GEMINI_SCHEMA_KEYS[key]) {
-      continue;
-    }
-    if (key === "type") {
-      if (Array.isArray(value)) {
-        const nonNullType = value.find((t) => t !== "null");
-        cleaned.type = typeof nonNullType === "string" ? nonNullType : "string";
-        cleaned.nullable = true;
-      } else {
-        cleaned.type = value;
+    // Whitelist attribute check
+    if (!ALLOWED_GEMINI_SCHEMA_KEYS[key]) continue;
+    if (key === "type") continue;
+
+    if (key === "format") {
+      // Gemini hanya mengizinkan format untuk enum atau date-time
+      if (value === "date-time" || Array.isArray(rawObj.enum)) {
+        cleaned.format = value;
       }
       continue;
     }
 
-    // Bersihkan nested properties
     if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
       const propObj: Record<string, unknown> = {};
       for (const [propKey, propVal] of Object.entries(value as Record<string, unknown>)) {
         if (propVal && typeof propVal === "object" && !Array.isArray(propVal)) {
-          propObj[propKey] = cleanGeminiSchema(propVal);
+          propObj[propKey] = cleanGeminiSchema(propVal, defs);
         } else {
           propObj[propKey] = propVal;
         }
@@ -96,9 +132,8 @@ export function cleanGeminiSchema(schema: unknown): Record<string, unknown> {
       continue;
     }
 
-    // Bersihkan nested items (untuk tipe array)
     if (key === "items" && value && typeof value === "object") {
-      cleaned.items = cleanGeminiSchema(value);
+      cleaned.items = cleanGeminiSchema(value, defs);
       continue;
     }
 
@@ -107,7 +142,6 @@ export function cleanGeminiSchema(schema: unknown): Record<string, unknown> {
 
   return cleaned;
 }
-
 function convertToolsToGemini(rawTools: unknown): GeminiTool[] | undefined {
   if (!Array.isArray(rawTools) || rawTools.length === 0) return undefined;
 
@@ -241,8 +275,11 @@ export function toGeminiPayload(
     });
   }
 
+  const isThinkingModel =
+    config.model.includes("2.5") ||
+    config.model.toLowerCase().includes("thinking");
   const rawMaxTokens = payload.max_tokens ?? config.max_output_tokens ?? 2048;
-  const safeMaxOutputTokens = Math.max(rawMaxTokens, 4096);
+  const safeMaxOutputTokens = isThinkingModel ? Math.max(rawMaxTokens, 4096) : rawMaxTokens;
 
   const geminiPayload: GeminiPayload = {
     contents,
@@ -278,7 +315,7 @@ export async function callGemini(
     ? config.base_url.replace(/\/+$/, "")
     : "https://generativelanguage.googleapis.com/v1beta";
 
-  const url = `${base}/models/${cleanModel}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+  const url = `${base}/models/${cleanModel}:generateContent`;
   const geminiBody = toGeminiPayload(payload, config);
 
   for (let attempt = 0; ; attempt += 1) {
@@ -291,6 +328,7 @@ export async function callGemini(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "x-goog-api-key": cleanKey,
       },
       body: JSON.stringify(geminiBody),
       signal: effectiveSignal,

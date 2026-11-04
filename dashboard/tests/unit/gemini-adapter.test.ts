@@ -380,16 +380,17 @@ describe("Gemini Adapter (toGeminiPayload & geminiToOpenAi)", () => {
 
       expect(response.ok).toBe(true);
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=AIzaSyDummyKey123",
-        ),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
         expect.objectContaining({
           method: "POST",
           headers: expect.objectContaining({
             "Content-Type": "application/json",
+            "x-goog-api-key": "AIzaSyDummyKey123",
           }),
         }),
       );
+      const calledUrl = (globalThis.fetch as any).mock.calls[0][0];
+      expect(calledUrl).not.toContain("?key=");
     });
   });
 });

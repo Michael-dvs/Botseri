@@ -26,6 +26,7 @@ export default async function IntegrationsPage() {
         base_url: config.base_url,
         stt_model: config.stt_model,
         is_active: config.is_active,
+        is_fallback: Boolean(config.is_fallback),
         temperature: config.temperature,
         max_output_tokens: config.max_output_tokens,
         price_input_per_mtok:

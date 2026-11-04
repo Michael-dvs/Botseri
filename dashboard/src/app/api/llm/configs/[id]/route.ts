@@ -25,6 +25,7 @@ const updateSchema = z
     price_input_per_mtok: z.number().nonnegative().nullable().optional(),
     price_output_per_mtok: z.number().nonnegative().nullable().optional(),
     is_active: z.boolean().optional(),
+    is_fallback: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.provider === "CUSTOM_OPENAI_COMPAT" && value.base_url === null) {
@@ -65,6 +66,12 @@ export async function PATCH(
       if (input.is_active) {
         await tx.llmConfig.updateMany({ data: { is_active: false } });
       }
+      if (input.is_fallback) {
+        await tx.llmConfig.updateMany({
+          where: { id: { not: params.id } },
+          data: { is_fallback: false },
+        });
+      }
       await tx.llmConfig.update({
         where: { id: params.id },
         data: {
@@ -80,6 +87,7 @@ export async function PATCH(
           price_input_per_mtok: input.price_input_per_mtok,
           price_output_per_mtok: input.price_output_per_mtok,
           is_active: input.is_active,
+          is_fallback: input.is_fallback,
         },
       });
     });

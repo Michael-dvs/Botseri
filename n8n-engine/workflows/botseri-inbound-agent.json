@@ -832,7 +832,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ chat_id: $('Accept').item.json.chat_id || $('Filter Event').item.json.payload.from, phone_e164: $('Accept').item.json.phone_e164 || null, body: ($json.error && (String($json.error).toLowerCase().includes('too many requests') || String($json.error).toLowerCase().includes('rate limit')) ? 'Batas kuota harian model LLM terlampaui (Rate Limit). Silakan pilih model lain atau tambah kuota di menu Integrasi.' : 'Maaf, ada kendala saat memproses permintaan Anda. Silakan coba lagi sebentar lagi.'), trigger_type: 'CHAT_MASUK' }) }}",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Accept').item.json.chat_id || $('Filter Event').item.json.payload.from, phone_e164: $('Accept').item.json.phone_e164 || null, body: ($json.error?.code === 'TRUNCATED' ? 'Jawaban terpotong karena batas panjang teks. Silakan coba ulangi permintaan secara lebih spesifik atau sesuaikan batas token di dashboard.' : $json.error?.code === 'RATE_LIMIT' || ($json.error && (String($json.error).toLowerCase().includes('too many requests') || String($json.error).toLowerCase().includes('rate limit'))) ? 'Batas kuota harian model LLM terlampaui (Rate Limit). Silakan pilih model lain atau tambah kuota di menu Integrasi.' : $json.error?.code === 'AUTH' ? 'Kunci API model LLM tidak valid atau kedaluwarsa. Periksa menu Integrasi.' : 'Maaf, ada kendala saat memproses permintaan Anda. Silakan coba lagi sebentar lagi.'), trigger_type: 'CHAT_MASUK' }) }}",
         "options": {
           "timeout": 30000
         }

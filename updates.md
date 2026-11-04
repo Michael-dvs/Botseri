@@ -1686,3 +1686,47 @@ Mengonsolidasikan arsitektur internal tanpa regresi fungsional:
   ```sql
   DROP INDEX IF EXISTS "authorized_numbers_one_primary";
   ```
+
+## [2026-11-04] S11: LLM Gateway: Konfigurasi Nyata, Klasifikasi Error, dan Gemini (P2)
+
+### 1. Ringkasan Perbaikan
+Menerapkan penimpaan parameter otoritatif (`temperature` dan `max_output_tokens`) dari database aktif pada gateway internal untuk mengatasi nilai statis default n8n, dengan kompensasi lantai 4096 token khusus model thinking. Mengklasifikasikan error upstream ke format terstruktur `ProviderErrorKind` (`RATE_LIMIT`, `AUTH`, `TIMEOUT`, `BAD_REQUEST`, `UPSTREAM`, `TRUNCATED`) serta menyelaraskan node penanganan fallback di n8n (`botseri-inbound-agent.json`). Mendeteksi output terpotong (`finish_reason: "length"`) dan mencatat `LLM_TRUNCATED`. Menambahkan retry 1x dengan penghormatan `Retry-After` <= 5 detik, migrasi kolom `is_fallback` pada `llm_configs` dengan indeks parsial unik di PostgreSQL, otomatis failover ke model cadangan (`LLM_FALLBACK_TRIGGERED`), serta banner peringatan model gratis di UI. Mengamankan adapter Gemini dengan pengiriman API key via header `x-goog-api-key` (menghapus `?key=` dari URL), pembersihan skema OpenAPI berbasis whitelist ketat, dan stabilisasi ID pemanggilan tool.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/llm-gateway/errors.ts` | Baru | Definisi tipe terstruktur `ProviderErrorKind`, `ProviderError`, `OutputTruncatedError`, dan serialisasi JSON standar. |
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan kolom `is_fallback` pada model `LlmConfig`. |
+| `dashboard/prisma/migrations/20261104230000_add_is_fallback_to_llm_configs/migration.sql` | Baru | Migrasi SQL forward-only penambahan kolom `is_fallback` dan indeks unik parsial `llm_configs_one_fallback`. |
+| `dashboard/src/lib/llm-gateway/index.ts` | Modifikasi | Implementasi retry 1x, otomatis failover ke model fallback (`getFallbackConfig`), dan deteksi output terpotong. |
+| `dashboard/src/lib/llm-gateway/gemini.ts` | Modifikasi | Pembersihan skema whitelist resmi OpenAPI, header `x-goog-api-key`, kompensasi model thinking, dan penghapusan query `?key=`. |
+| `dashboard/src/lib/llm-gateway/catalog.ts` | Modifikasi | Pemanggilan katalog Gemini via header `x-goog-api-key` tanpa query parameter. |
+| `dashboard/src/app/api/internal/llm/v1/chat/completions/route.ts` | Modifikasi | Penimpaan parameter otoritatif dari database dan pemetaan response error terklasifikasi. |
+| `dashboard/src/app/api/llm/configs/route.ts` | Modifikasi | Validasi dan penanganan kolom `is_fallback` pada pembuatan konfigurasi LLM baru. |
+| `dashboard/src/app/api/llm/configs/[id]/route.ts` | Modifikasi | Dukungan pembaruan status `is_fallback` pada konfigurasi LLM tersimpan. |
+| `dashboard/src/app/(app)/integrations/IntegrationsPanel.tsx` | Modifikasi | Checkbox model fallback, badge model fallback pada daftar kartu, dan banner peringatan model gratis. |
+| `dashboard/src/app/(app)/integrations/page.tsx` | Modifikasi | Penerusan nilai `is_fallback` ke panel Integrasi. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Pembaruan node fallback error n8n berbasis `error.code` terstruktur dan penanganan pesan terpotong. |
+| `dashboard/tests/unit/llm-gateway.test.ts` | Baru | Pengujian unit penimpaan parameter, batas lantai model thinking, deteksi output terpotong, retry, dan failover model fallback. |
+| `dashboard/tests/unit/gemini-adapter.test.ts` | Modifikasi | Pengujian unit header API key Gemini, url bersih dari query key, dan pembersih skema whitelist. |
+| `dashboard/tests/unit/llm-gateway-route.test.ts` | Modifikasi | Penyelarasan mock error gateway dengan tipe `OutputTruncatedError`. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S11. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 45 test file, **424 test cases** lulus 100%.
+2. **Audit Keamanan Kunci API:**
+   - `grep -Rn "generativelanguage.*key=" dashboard/src`: 0 temuan (URL bersih, kunci dikirim via header `x-goog-api-key`).
+3. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+4. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+5. **Smoke Test:** `./scripts/smoke.sh` lulus bersih (11 pemeriksaan lulus, 0 kegagalan).
+6. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+7. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104230000_add_is_fallback_to_llm_configs` (penambahan kolom `is_fallback` dan indeks unik parsial `llm_configs_one_fallback`).
+- Rollback Migrasi:
+  ```sql
+  DROP INDEX IF EXISTS "llm_configs_one_fallback";
+  ALTER TABLE "llm_configs" DROP COLUMN IF EXISTS "is_fallback";
+  ```

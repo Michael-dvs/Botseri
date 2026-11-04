@@ -13,6 +13,7 @@ type LlmConfig = {
   base_url: string | null;
   stt_model: string | null;
   is_active: boolean;
+  is_fallback?: boolean;
   temperature: number;
   max_output_tokens: number;
   price_input_per_mtok: number | null;
@@ -118,6 +119,7 @@ export function IntegrationsPanel({
   const [formPriceInput, setFormPriceInput] = useState("");
   const [formPriceOutput, setFormPriceOutput] = useState("");
   const [formIsActive, setFormIsActive] = useState(true);
+  const [formIsFallback, setFormIsFallback] = useState(false);
 
   async function fetchCatalog(providerToFetch = selectedProvider) {
     setIsFetchingCatalog(true);
@@ -245,6 +247,7 @@ export function IntegrationsPanel({
             ? Number(form.get("price_output_per_mtok"))
             : null,
           is_active: form.get("is_active") === "on",
+          is_fallback: form.get("is_fallback") === "on",
         }),
       });
 
@@ -266,6 +269,7 @@ export function IntegrationsPanel({
       setFormPriceInput("");
       setFormPriceOutput("");
       setSelectedCatalogItem(null);
+      setFormIsFallback(false);
       setFormTemperature("0.2");
       setFormMaxOutputTokens("1000");
       setShowAdvanced(false);
@@ -559,6 +563,16 @@ export function IntegrationsPanel({
           </div>
         </div>
 
+        {/* Peringatan model gratis tanpa fallback */}
+        {activeConfig?.model.includes(":free") && !configs.some((c) => c.is_fallback) && (
+          <div
+            role="alert"
+            className="mt-4 rounded border border-amber-300 bg-amber-50 p-4 text-xs text-amber-900"
+          >
+            <strong>Perhatian:</strong> Model aktif utama menggunakan tier gratis ({activeConfig.model}) dan belum ada model cadangan (fallback) yang dikonfigurasi. Disarankan mengaktifkan model cadangan untuk menghindari kegagalan saat terkena rate limit.
+          </div>
+        )}
+
         {/* Daftar konfigurasi tersimpan */}
         <div className="mt-4">
           <p className="eyebrow mb-2">Konfigurasi tersimpan</p>
@@ -587,6 +601,8 @@ export function IntegrationsPanel({
                         </span>
                         {config.is_active ? (
                           <span className="badge badge-success text-[0.68rem]">Aktif</span>
+                        ) : config.is_fallback ? (
+                          <span className="badge badge-warning text-[0.68rem]">Fallback</span>
                         ) : null}
                       </div>
                       <p className="mt-1 font-mono text-sm font-semibold">{config.model}</p>
@@ -920,6 +936,20 @@ export function IntegrationsPanel({
                   className="size-4 rounded accent-[var(--accent)]"
                 />
                 Jadikan konfigurasi aktif langsung setelah disimpan
+              </label>
+            </div>
+
+            {/* Checkbox Status Fallback */}
+            <div className="flex items-center gap-2 md:col-span-12">
+              <label className="flex cursor-pointer items-center gap-2 text-sm min-h-[44px]">
+                <input
+                  name="is_fallback"
+                  type="checkbox"
+                  checked={formIsFallback}
+                  onChange={(e) => setFormIsFallback(e.target.checked)}
+                  className="size-4 rounded accent-[var(--accent)]"
+                />
+                Jadikan model cadangan (fallback)
               </label>
             </div>
 

@@ -26,6 +26,7 @@ const schema = z
     price_input_per_mtok: z.number().nonnegative().nullable().optional(),
     price_output_per_mtok: z.number().nonnegative().nullable().optional(),
     is_active: z.boolean().default(true),
+    is_fallback: z.boolean().default(false),
   })
   .superRefine((value, ctx) => {
     if (value.provider === "CUSTOM_OPENAI_COMPAT" && !value.base_url) {
@@ -48,6 +49,7 @@ type ConfigRow = {
   price_input_per_mtok: unknown;
   price_output_per_mtok: unknown;
   is_active: boolean;
+  is_fallback: boolean;
   api_key_enc: string;
 };
 
@@ -69,6 +71,7 @@ function toPublic(config: ConfigRow) {
         ? null
         : Number(config.price_output_per_mtok),
     is_active: config.is_active,
+    is_fallback: Boolean(config.is_fallback),
     has_api_key: config.api_key_enc.length > 0,
   };
 }
@@ -95,6 +98,9 @@ export async function POST(request: Request) {
       if (input.is_active) {
         await tx.llmConfig.updateMany({ data: { is_active: false } });
       }
+      if (input.is_fallback) {
+        await tx.llmConfig.updateMany({ data: { is_fallback: false } });
+      }
       return tx.llmConfig.create({
         data: {
           provider: input.provider,
@@ -107,6 +113,7 @@ export async function POST(request: Request) {
           price_input_per_mtok: input.price_input_per_mtok ?? null,
           price_output_per_mtok: input.price_output_per_mtok ?? null,
           is_active: input.is_active,
+          is_fallback: input.is_fallback,
         } satisfies Prisma.LlmConfigCreateInput,
       });
     });

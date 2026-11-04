@@ -284,16 +284,14 @@ export async function fetchGeminiCatalog(
   apiKey: string,
 ): Promise<UnifiedModelCatalogItem[]> {
   const cleanKey = apiKey.trim();
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`,
-    {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS),
+  const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "x-goog-api-key": cleanKey,
     },
-  );
+    signal: AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS),
+  });
 
   if (!res.ok) {
     const errorText = await res.text().catch(() => "");
