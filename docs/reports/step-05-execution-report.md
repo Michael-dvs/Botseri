@@ -1,4 +1,4 @@
-# Step 05 — Laporan Eksekusi Settings, LLM Manager, WAHA, dan Google Integration
+# Step 05 : Laporan Eksekusi Settings, LLM Manager, WAHA, dan Google Integration
 
 > **Tanggal:** 20 Oktober 2026
 > **Status:** Selesai
@@ -23,7 +23,7 @@ Step 05 melengkapi seluruh konfigurasi runtime yang menjadi pondasi eksekusi age
   - `INV-09`: Seluruh payload divalidasi ketat menggunakan skema `zod` di setiap boundary route handler.
 - **Standar Desain `antislop.md`**:
   - Bahasa visual *editorial utilitarian* dipertahankan secara utuh pada `/settings` dan `/integrations`.
-  - Bebas karakter em dash (`—`) pada seluruh teks UI (`R-02`).
+  - Bebas karakter em dash pada seluruh teks UI (`R-02`).
   - Target sentuh tombol dan elemen interaktif minimal 44px (`min-h-11`), kontras teks memenuhi standar WCAG AA (`R-25`, `R-32`).
   - Feedback visual taktil, status badge informatif (`WORKING`, `SCAN_QR_CODE`, `CONNECTED`, `NEEDS_REAUTH`, dll.), serta penanganan state loading, busy, error, dan empty state secara menyeluruh (`R-27`).
 
@@ -91,7 +91,7 @@ Step 05 melengkapi seluruh konfigurasi runtime yang menjadi pondasi eksekusi age
 
 ### 3.2 Hasil Pengujian 5 Skenario Definition of Done
 
-#### Skenario 1 — Settings & Auto-Recompile + Holidays
+#### Skenario 1 : Settings & Auto-Recompile + Holidays
 - Panggilan: `PUT /api/settings` dengan payload `work_hours_end: "18:00"` dan `behavior_mode: "SANTAI"`.
 - Hasil: `HTTP 200 OK`, `warnings: []`.
 - Verifikasi Database PostgreSQL:
@@ -106,10 +106,10 @@ Step 05 melengkapi seluruh konfigurasi runtime yang menjadi pondasi eksekusi age
   - `GET /api/holidays` -> mengembalikan daftar hari libur `[{"date":"2026-12-25","label":"Hari Raya Natal"}]`.
   - `DELETE /api/holidays?date=2026-12-25` -> `HTTP 200 OK`, baris di PostgreSQL terhapus (`count = 0`).
 
-#### Skenario 2 — Multi-LLM Manager & Enkripsi AAD (`v1:`)
+#### Skenario 2 : Multi-LLM Manager & Enkripsi AAD (`v1:`)
 - Pembuatan Konfigurasi:
-  - Konfigurasi 1 (OpenAI `gpt-4o-mini`, `is_active: true`, API key `sk-openai-secret-key-12345678`) -> `HTTP 200`, ID `7306d439-0c72-4866-9040-a358c8429b93`.
-  - Konfigurasi 2 (Anthropic `claude-3-5-sonnet-20241022`, `is_active: false`, API key `sk-ant-secret-key-87654321`) -> `HTTP 200`, ID `8b261a98-b841-4354-acdd-d4d7ec596f3d`.
+  - Konfigurasi 1 (OpenAI `gpt-4o-mini`, `is_active: true`, API key `sk-test-***`) -> `HTTP 200`, ID `7306d439-0c72-4866-9040-a358c8429b93`.
+  - Konfigurasi 2 (Anthropic `claude-3-5-sonnet-20241022`, `is_active: false`, API key `sk-test-***`) -> `HTTP 200`, ID `8b261a98-b841-4354-acdd-d4d7ec596f3d`.
 - Verifikasi Enkripsi di PostgreSQL:
   - Kolom `api_key_enc` diawali `v1:` (`v1:dd251ba...`).
   - Kolom `api_key_enc` tidak memuat plaintext API key (`leaks_plaintext = false`).
@@ -117,10 +117,10 @@ Step 05 melengkapi seluruh konfigurasi runtime yang menjadi pondasi eksekusi age
   - `PATCH /api/llm/configs/8b261a98-b841-4354-acdd-d4d7ec596f3d` dengan `{"is_active": true}` -> `HTTP 200`.
   - Di database, Anthropic menjadi `is_active = true`, sementara OpenAI otomatis berubah menjadi `is_active = false`.
 - Verifikasi AAD:
-  - Dekripsi `api_key_enc` dengan AAD yang benar (`llm_configs.api_key_enc`) berhasil mengembalikan plaintext asli `sk-openai-secret-key-12345678`.
+  - Dekripsi `api_key_enc` dengan AAD yang benar (`llm_configs.api_key_enc`) berhasil mengembalikan plaintext asli `sk-test-***`.
   - Dekripsi dengan AAD yang salah (`wrong.aad`) melempar exception: `"Unsupported state or unable to authenticate data"`.
 
-#### Skenario 3 — WAHA Status & Alur End-to-End Pairing Code
+#### Skenario 3 : WAHA Status & Alur End-to-End Pairing Code
 - Status WAHA: `GET /api/waha/status` mengembalikan `{"ok":true,"session":"default","status":"SCAN_QR_CODE"}` melalui jaringan internal Docker `botseri-net` tanpa ekspos port host WAHA.
 - Pembuatan Kode Pairing:
   - `POST /api/waha/pairing-code` -> `HTTP 200`, kode `PAIR-ZHYSS7`.
@@ -132,7 +132,7 @@ Step 05 melengkapi seluruh konfigurasi runtime yang menjadi pondasi eksekusi age
   - Tabel `authorized_numbers` mencatat `chat_id = '6281234567890@c.us'`, `is_owner = true`, `label = 'Owner (paired)'`.
   - Tabel `pairing_codes` mencatat `used_at = '2026-10-20 16:35:23.629+00'`.
 
-#### Skenario 4 — Google OAuth Kredensial & Redirect Start
+#### Skenario 4 : Google OAuth Kredensial & Redirect Start
 - Penyimpanan Kredensial:
   - `PUT /api/oauth/google/credentials` dengan `client_id` dan `client_secret` -> `HTTP 200 OK`.
   - Di PostgreSQL, kolom `client_secret_enc` diawali `v1:` dan tidak memuat plaintext secret.
@@ -141,7 +141,7 @@ Step 05 melengkapi seluruh konfigurasi runtime yang menjadi pondasi eksekusi age
   - Parameter query memuat `client_id`, `redirect_uri=https://panel.yourdomain.com/api/oauth/google/callback`, `scope` (`calendar.events` dan `tasks`), `access_type=offline`, dan `prompt=consent`.
   - Response header menyetel cookie CSRF `google_oauth_state` dengan atribut `HttpOnly; SameSite=lax; Max-Age=600`.
 
-#### Skenario 5 — Sinkronisasi To-Do & Ketahanan Kegagalan Google
+#### Skenario 5 : Sinkronisasi To-Do & Ketahanan Kegagalan Google
 - Kondisi Google `DISCONNECTED`:
   - `POST /api/todos` dengan tugas `"Tugas saat disconnected"`.
   - Tugas tersimpan normal dengan `google_sync_status = 'NOT_REQUIRED'`.

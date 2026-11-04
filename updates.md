@@ -1239,3 +1239,53 @@ Memperbaiki kebocoran pesanan selesai pada to-do tool, mengimplementasikan auto-
 1. **Unit Test Suite:** 31 test file, **310 test cases** lulus 100%.
 2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
 3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-04] S02: Kebersihan Repo dan Perlindungan Rahasia (Git Init, Secret Scanner, Pre-commit Hook, Panduan Lokasi Repo)
+
+### 1. Ringkasan Perbaikan
+Menerapkan perbaikan fondasi keamanan dan kontrol versi repositori (P0):
+1. **Inisialisasi Git & Penguncian `.gitignore`:**
+   - Menginisialisasi repositori Git lokal (`git init`).
+   - Memperbarui berkas root `.gitignore` untuk mengunci seluruh berkas sensitif dan artefak: `.env`, `.env.*` (kecuali `.env.example`), `backups/`, `*.dump`, `*.tar.gz`, `node_modules/`, `**/.next/`, `n8n-engine/data/`, dan `*.log`.
+   - Memastikan berkas `.env` dan dump database di direktori `backups/` tidak terlacak oleh Git (`git status --ignored`).
+   - Membuat commit inisialisasi terpisah: `chore(s02): inisialisasi git`.
+2. **Pemindai Rahasia Otomatis (`scripts/check-secrets.sh`):**
+   - Membuat skrip `scripts/check-secrets.sh` yang memindai berkas pohon kerja dari kebocoran kunci API OpenAI (`sk-...`), Google Gemini (`AIzaSy...`), private key PEM (`BEGIN ... KEY`), dan `ENCRYPTION_KEY=...`.
+   - Menjaga kerahasiaan saat pelanggaran terdeteksi: skrip hanya mencetak nama file dan nomor baris ke stderr tanpa mencetak nilai rahasia (zero secret exposure), lalu keluar dengan exit code `1`.
+   - Menambahkan pengujian regresi di `dashboard/tests/unit/check-secrets.test.ts` (uji kasus bersih exit 0, uji kasus deteksi kunci palsu exit 1, dan verifikasi nilai rahasia disamarkan).
+3. **Integrasi CI, Smoke Test, & Git Hook:**
+   - Menambahkan langkah eksekusi `check-secrets.sh` di dalam alur `.github/workflows/ci.yml`.
+   - Mengintegrasikan pemeriksaan rahasia di dalam skrip `scripts/smoke.sh`.
+   - Membuat pre-commit hook di `.githooks/pre-commit` dan mengonfigurasi `core.hooksPath` agar setiap commit secara otomatis memindai kebocoran rahasia.
+4. **Panduan Lokasi Repositori di Dokumentasi:**
+   - Menambahkan panduan di `README.md` dan `docs/RUNBOOK.md` terkait larangan meletakkan repositori di folder sinkronisasi cloud (Google Drive, Dropbox, OneDrive, iCloud) demi mencegah kebocoran `.env` serta korupsi file lock Git.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `.gitignore` | Modifikasi | Pengecualian ketat berkas `.env*`, `backups/`, `*.dump`, `*.tar.gz`, `node_modules/`, dan cache build. |
+| `.env.example` | Modifikasi | Penghapusan karakter em dash pada komentar header. |
+| `scripts/check-secrets.sh` | Baru | Skrip bash pemindaian rahasia otomatis pada pohon kerja. |
+| `.githooks/pre-commit` | Baru | Hook pre-commit Git untuk menjalankan pemindai rahasia sebelum commit. |
+| `dashboard/tests/unit/check-secrets.test.ts` | Baru | Pengujian unit kasus positif dan negatif untuk `check-secrets.sh`. |
+| `.github/workflows/ci.yml` | Modifikasi | Penambahan langkah pemindaian rahasia di job test CI. |
+| `scripts/smoke.sh` | Modifikasi | Penambahan pemeriksaan `check-secrets.sh` pada pengujian asap lokal. |
+| `README.md` | Modifikasi | Sub-bagian panduan lokasi repositori yang disarankan dan pre-commit hook. |
+| `docs/RUNBOOK.md` | Modifikasi | Sub-bagian 5.5 panduan penataan direktori lokal dan pencegahan sinkronisasi cloud. |
+| `docs/reports/step-05-execution-report.md` | Modifikasi | Penyamaran dummy API key agar bersih dari deteksi pemindai rahasia. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan S02. |
+
+### 3. Hasil Verifikasi
+1. **Git Ignored Check:** `.env` dan `backups/` masuk daftar *Ignored files* dan tidak berada di staging area.
+2. **Secret Scanner Check:** `./scripts/check-secrets.sh` menghasilkan exit code 0 tanpa temuan rahasia.
+3. **Unit Test Suite:** 32 test file, **313 test cases** lulus 100%.
+4. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+5. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+6. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 4. Langkah Manual Pemilik Proyek (Known Issues / Perlu Verifikasi Manual)
+1. Pindahkan direktori proyek dari Google Drive (`/Users/michaelarhdyn/Library/CloudStorage/GoogleDrive-...`) ke direktori disk lokal murni (misal: `/Users/michaelarhdyn/projects/Botseri`).
+2. Rotasi nilai `ENCRYPTION_KEY`, API key provider LLM, dan token internal karena repositori sempat berada di dalam folder sinkronisasi cloud.

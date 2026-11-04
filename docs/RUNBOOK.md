@@ -149,6 +149,19 @@ Lakukan drill restore minimal satu kali setiap kuartal (3 bulan) untuk memastika
 4. Jalankan `./scripts/restore.sh --yes <dump-terbaru>`.
 5. Pastikan to-do penanda uji hilang, data kembali ke kondisi sebelum backup, dan kredensial terenkripsi tetap dapat dibaca di halaman `/status`.
 
+### 5.5 Lokasi Repositori yang Disarankan
+Repositori produksi **dilarang keras** diletakkan di dalam folder sinkronisasi cloud seperti Google Drive, OneDrive, iCloud, atau Dropbox karena:
+1. **Kebocoran Kunci Enkripsi & Data:** Klien cloud secara otomatis menyinkronkan berkas sensitif `.env` (memuat `ENCRYPTION_KEY`) dan arsip dump database pelanggan di folder `backups/` ke server cloud pihak ketiga.
+2. **Kerusakan Indeks Git:** Sinkronisasi file cloud dapat mengunci berkas indeks `.git`, merusak basis data Git, atau mengganggu file lock database Docker.
+
+Rekomendasi Pemulihan dan Penataan:
+- Pindahkan direktori repositori ke path lokal murni di luar folder cloud drive (contoh: `/home/<user>/projects/botseri` di Linux/WSL2 atau direktori disk lokal murni di Windows).
+- Jika repositori sempat tersinkronisasi ke cloud, segera lakukan rotasi kunci `ENCRYPTION_KEY` mengikuti prosedur di Bagian 6, serta rotasi API key LLM dan token internal.
+- Aktifkan hook Git pre-commit untuk pemindaian rahasia otomatis sebelum setiap commit:
+  ```bash
+  git config core.hooksPath .githooks
+  ```
+
 ---
 
 ## 6. Prosedur Rotasi Kunci Enkripsi

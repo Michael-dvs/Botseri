@@ -80,6 +80,18 @@ Pastikan seluruh layanan aktif dan sehat:
 docker compose ps
 ```
 
+### Lokasi Repositori yang Disarankan
+Repositori produksi **dilarang keras** diletakkan di dalam folder sinkronisasi cloud seperti Google Drive, OneDrive, iCloud, atau Dropbox karena:
+1. **Kebocoran Rahasia:** Klien cloud otomatis mengunggah berkas `.env` (yang memuat `ENCRYPTION_KEY`) dan direktori `backups/` ke penyimpanan cloud pihak ketiga.
+2. **Kerusakan Indeks Git & Lock File:** Sinkronisasi file cloud dapat mengunci berkas indeks `.git`, merusak basis data internal Git, atau menimbulkan konflik sinkronisasi pada file database sementara.
+
+Panduan Penataan Lokasi:
+- Pindahkan repositori ke direktori lokal murni (misal: `/home/<user>/projects/botseri` di Linux/WSL2 atau `C:\projects\botseri` di Windows).
+- Jika terpaksa berada di komputer dengan klien cloud aktif, kecualikan berkas `.env`, direktori `backups/`, `.git/`, dan `node_modules/` dari sinkronisasi otomatis.
+- Aktifkan pemindai rahasia pre-commit otomatis dengan perintah:
+  ```bash
+  git config core.hooksPath .githooks
+  ```
 ---
 
 ## 5. Alur Pengaturan Awal (First-Time Setup)

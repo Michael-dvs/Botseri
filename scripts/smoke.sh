@@ -78,6 +78,11 @@ WORKFLOWS_OK=1
 "$REPO_ROOT/scripts/validate-workflows.sh" >/dev/null 2>&1 && WORKFLOWS_OK=0
 check "Workflow n8n: validate-workflows.sh lulus" "$WORKFLOWS_OK"
 
+# 4b. Pemindaian rahasia di repositori (check-secrets.sh)
+SECRETS_OK=1
+"$REPO_ROOT/scripts/check-secrets.sh" >/dev/null 2>&1 && SECRETS_OK=0
+check "Pemeriksaan rahasia: check-secrets.sh lulus" "$SECRETS_OK"
+
 # 5. Container botseri-n8n TIDAK memiliki DATABASE_URL (INV-01)
 N8N_DB_OK=1
 if command -v docker >/dev/null 2>&1 && docker compose ps --status running --services 2>/dev/null | grep -q "botseri-n8n"; then

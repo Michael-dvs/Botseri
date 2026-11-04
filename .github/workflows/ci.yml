@@ -68,6 +68,9 @@ jobs:
         working-directory: .
         run: ./scripts/validate-workflows.sh
 
+      - name: Scan secrets in repo
+        working-directory: .
+        run: ./scripts/check-secrets.sh
       - name: Lint shell scripts with shellcheck
         working-directory: .
         run: |
