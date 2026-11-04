@@ -1,0 +1,1451 @@
+{
+  "id": "botseriInboundAgent01",
+  "name": "Botseri Inbound Agent",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": false,
+    "saveDataErrorExecution": "all",
+    "executionTimeout": 120
+  },
+  "nodes": [
+    {
+      "id": "webhook-incoming",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "b07e51a4-1c1f-4e7a-9f0a-4a4f3d1f0001",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wa-incoming",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "filter-event",
+      "name": "Filter Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const input = $json.body ?? $json ?? {};\nconst payload = input.payload ?? {};\nconst from = String(payload.from ?? '');\nconst target = String(payload.fromMe ? (payload.to || payload.chatId || payload.from) : from);\nconst isBlockedChat = !target || target.endsWith('@g.us') || target.includes('@newsletter') || target === 'status@broadcast' || target.includes('@broadcast');\nif (input.event !== 'message' || isBlockedChat) return [];\nreturn [{ json: { event: input.event, session: input.session ?? 'default', payload } }];"
+      }
+    },
+    {
+      "id": "http-accept",
+      "name": "Accept",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/inbound/accept",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ wa_message_id: $json.payload.id, chat_id: $json.payload.fromMe ? ($json.payload.to || $json.payload.chatId || $json.payload.from) : $json.payload.from, from: $json.payload.from, participant: $json.payload.participant || null, phone: $json.payload.phone || null, remote_jid_alt: $json.payload._data?.key?.remoteJidAlt || $json.payload.remoteJidAlt || null, sender_pn: $json.payload._data?.key?.senderPn || $json.payload.senderPn || null, author: $json.payload.author || $json.payload._data?.author || null, body: $json.payload.body || null, has_media: $json.payload.hasMedia === true, media_type: $json.payload.media?.mimetype || null, from_me: $json.payload.fromMe === true, received_at: new Date(Number($json.payload.timestamp || 0) > 1e11 ? Number($json.payload.timestamp) : Number($json.payload.timestamp || Date.now() / 1000) * 1000).toISOString() }) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "continueOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "if-direct-reply",
+      "name": "Ada Balasan Langsung?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-reply",
+              "leftValue": "={{ Boolean($json.paired === true || $json.reason === 'PAIRED' || $json.reason === 'ALREADY_PAIRED' || ($json.reply_text && $json.reply_text.length > 0)) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-send-direct-reply",
+      "name": "Kirim Balasan Langsung",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        480
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/waha/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id || $json.reply_to_chat_id || $('Filter Event').item.json.payload.from, phone_e164: $json.phone_e164 || null, body: $json.reply_text, trigger_type: ($json.paired || $json.reason === 'PAIRED' || $json.reason === 'ALREADY_PAIRED') ? 'PAIRING' : 'CHAT_MASUK' }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "if-accept",
+      "name": "Diterima?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "accept-true",
+              "leftValue": "={{ Boolean($json.accept === true && $json.paired !== true && !$json.reply_text) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "noop-rejected",
+      "name": "Selesai Tanpa Balasan",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1140,
+        360
+      ]
+    },
+    {
+      "id": "if-audio",
+      "name": "Voice Note?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "audio-true",
+              "leftValue": "={{ $('Filter Event').item.json.payload.hasMedia === true && String($('Filter Event').item.json.payload.media?.mimetype || '').startsWith('audio/') }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-download-audio",
+      "name": "Unduh Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Filter Event').item.json.payload.media.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriWaha",
+          "name": "Botseri WAHA"
+        }
+      }
+    },
+    {
+      "id": "http-transcribe",
+      "name": "Transkripsi",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1580,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/llm/v1/audio/transcriptions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "parameterType": "formData",
+              "name": "model",
+              "value": "botseri-default"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "http-save-transcript",
+      "name": "Simpan Transkrip",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/inbound/{{ $('Accept').item.json.message_id }}/transcript",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ transcript: $json.text }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "set-transcript-text",
+      "name": "Teks Transkrip",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2020,
+        0
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "transcript-text",
+              "name": "text",
+              "value": "={{ $('Transkripsi').item.json.text }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-context",
+      "name": "Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        100
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/context/chat",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "message_id",
+              "value": "={{ $('Accept').item.json.message_id }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "build-agent-input",
+      "name": "Susun Input Agen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        100
+      ],
+      "parameters": {
+        "jsCode": "const context = $('Context').item.json;\nconst text = $json.text ?? $('Filter Event').item.json.payload.body ?? '';\nreturn [{ json: { text: String(text).trim(), system_prompt: context.system_prompt } }];"
+      }
+    },
+    {
+      "id": "ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        2680,
+        100
+      ],
+      "parameters": {
+        "agent": "toolsAgent",
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "={{ $json.system_prompt }}",
+          "maxIterations": 6
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "lm-openai",
+      "name": "Botseri Gateway",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        2600,
+        320
+      ],
+      "parameters": {
+        "model": "botseri-default",
+        "options": {
+          "baseURL": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/llm/v1",
+          "temperature": 0.2,
+          "maxTokens": 2048,
+          "timeout": 45000,
+          "maxRetries": 1
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "botseriLlmGateway",
+          "name": "Botseri LLM Gateway"
+        }
+      }
+    },
+    {
+      "id": "tool-create",
+      "name": "tool_create_todo_and_order",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        2740,
+        320
+      ],
+      "parameters": {
+        "toolDescription": "Menyimpan to-do operasional atau pengingat baru ke sistem Botseri. Panggil saat pemilik meminta mencatat tugas, pengingat, atau pesanan. Contoh: {\"title\": \"Mengerjakan tugas RPL2\", \"remind_at\": \"2026-10-29T09:25:00+07:00\"}",
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/tools/create-todo-and-order",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "parametersBody": {
+          "values": [
+            {
+              "name": "source_message_id",
+              "valueProvider": "fieldValue",
+              "value": "={{ $('Accept').item.json.message_id }}"
+            },
+            {
+              "name": "title",
+              "valueProvider": "modelRequired"
+            },
+            {
+              "name": "priority_rank",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "due_at",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "remind_at",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "has_specific_time",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "customer_name",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "order_description",
+              "valueProvider": "modelOptional"
+            }
+          ]
+        },
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "title",
+              "description": "Judul singkat to-do operasional dalam bahasa Indonesia (e.g. 'Kirim bunga mawar ke pelanggan')",
+              "type": "string"
+            },
+            {
+              "name": "priority_rank",
+              "description": "Rank prioritas (1: Kritis/Hari-H, 2: Penting/Mudah rusak, 3: Cashflow, 4: Rutin). Default 1 jika mendesak",
+              "type": "number"
+            },
+            {
+              "name": "due_at",
+              "description": "Deadline atau batas akhir tugas (ISO-8601 dengan offset +07:00). HANYA isi jika pengguna eksplisit menyebut kata 'deadline', 'tenggat', atau 'paling lambat jam X'. Jangan isi jika hanya permintaan diingatkan.",
+              "type": "string"
+            },
+            {
+              "name": "has_specific_time",
+              "description": "true jika pengguna menyebut jam spesifik (e.g. 'jam 10:35'), false jika hanya tanggal",
+              "type": "boolean"
+            },
+            {
+              "name": "remind_at",
+              "description": "Waktu alarm pengingat agenda/tugas (ISO-8601 dengan offset +07:00, e.g. '2026-10-29T10:35:00+07:00'). Gunakan jika pengguna meminta 'ingatkan jam X', 'ada meeting jam X', atau 'jadwalkan jam X'.",
+              "type": "string"
+            },
+            {
+              "name": "customer_name",
+              "description": "Nama pelanggan pemesan jika ada pesanan baru. Jangan sertakan jika bukan pesanan",
+              "type": "string"
+            },
+            {
+              "name": "order_description",
+              "description": "Rincian atau catatan pesanan pelanggan jika ada. Jangan sertakan jika bukan pesanan",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "tool-list",
+      "name": "tool_get_prioritized_todos",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        2880,
+        320
+      ],
+      "parameters": {
+        "toolDescription": "Mengambil daftar to-do yang sudah diurutkan berdasarkan priority_rank dan tenggat waktu. WAJIB dipanggil saat pemilik meminta melihat daftar tugas, list tugas, to-do pending, atau prioritas kerja.",
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/tools/get-prioritized-todos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "parametersBody": {
+          "values": [
+            {
+              "name": "scope",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "limit",
+              "valueProvider": "modelOptional"
+            }
+          ]
+        },
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "scope",
+              "description": "TODAY, ALL_ACTIVE, atau OVERDUE",
+              "type": "string"
+            },
+            {
+              "name": "limit",
+              "description": "Jumlah maksimum item (default 30)",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "tool-status",
+      "name": "tool_update_todo_status",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        3020,
+        320
+      ],
+      "parameters": {
+        "toolDescription": "Memperbarui status tugas to-do (PENDING, IN_PROGRESS, DONE, CANCELLED).",
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/tools/update-todo-status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "parametersBody": {
+          "values": [
+            {
+              "name": "todo_id",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "match_text",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "status",
+              "valueProvider": "modelRequired"
+            }
+          ]
+        },
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "todo_id",
+              "description": "UUID to-do jika diketahui",
+              "type": "string"
+            },
+            {
+              "name": "match_text",
+              "description": "Judul atau kata kunci to-do",
+              "type": "string"
+            },
+            {
+              "name": "status",
+              "description": "Status baru: PENDING, IN_PROGRESS, DONE, CANCELLED",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "tool-update",
+      "name": "tool_update_todo",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        3160,
+        320
+      ],
+      "parameters": {
+        "toolDescription": "Memperbarui detail to-do: judul, tenggat, jam spesifik, atau prioritas.",
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/tools/update-todo",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "parametersBody": {
+          "values": [
+            {
+              "name": "todo_id",
+              "valueProvider": "modelRequired"
+            },
+            {
+              "name": "title",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "due_at",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "has_specific_time",
+              "valueProvider": "modelOptional"
+            },
+            {
+              "name": "priority_rank",
+              "valueProvider": "modelOptional"
+            }
+          ]
+        },
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "todo_id",
+              "description": "UUID to-do",
+              "type": "string"
+            },
+            {
+              "name": "title",
+              "description": "Judul baru",
+              "type": "string"
+            },
+            {
+              "name": "due_at",
+              "description": "ISO 8601 dengan offset",
+              "type": "string"
+            },
+            {
+              "name": "has_specific_time",
+              "description": "true jika jam eksplisit",
+              "type": "boolean"
+            },
+            {
+              "name": "priority_rank",
+              "description": "Rank prioritas",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "split-output",
+      "name": "Pecah Pesan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2900,
+        100
+      ],
+      "parameters": {
+        "jsCode": "const rawOutput = $json.output || $json.text || ($json.message && $json.message.content) || '';\nlet finalReply = typeof rawOutput === 'string' ? rawOutput.trim() : (rawOutput && typeof rawOutput === 'object' && typeof rawOutput.text === 'string' ? rawOutput.text.trim() : JSON.stringify(rawOutput));\nif (!finalReply) {\n  console.warn('[botseri-n8n] Output agen kosong atau gagal memproses tool:', JSON.stringify($json));\n  finalReply = 'Maaf, terjadi kendala saat memeriksa atau mencatat tugas. Coba ulangi sebentar lagi ya.';\n}\nconst parts = [];\nlet buffer = '';\nfor (const paragraph of finalReply.split(/\\n{2,}/)) {\n  const candidate = buffer ? `${buffer}\\n\\n${paragraph}` : paragraph;\n  if (candidate.length <= 3500) { buffer = candidate; continue; }\n  if (buffer) parts.push(buffer);\n  if (paragraph.length <= 3500) { buffer = paragraph; continue; }\n  for (let i = 0; i < paragraph.length; i += 3500) parts.push(paragraph.slice(i, i + 3500));\n  buffer = '';\n}\nif (buffer) parts.push(buffer);\nconst chatId = $('Filter Event').item.json.payload.from;\nreturn parts.map((part) => ({ json: { chat_id: chatId, text: part } }));"
+      }
+    },
+    {
+      "id": "http-send",
+      "name": "Kirim WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/waha/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, phone_e164: $json.phone_e164 || $json.to || $('Accept').item.json.phone_e164 || null, body: $json.body || $json.text, trigger_type: $json.trigger_type || 'CHAT_MASUK', reply_to_wa_message_id: $('Filter Event').item.json.payload.id }) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2500
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "http-outbound-log",
+      "name": "Log Outbound",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3340,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL }}/api/internal/outbound/log",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Pecah Pesan').item.json.chat_id, body: $('Pecah Pesan').item.json.text, in_reply_to: $('Accept').item.json.message_id }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "noop-done",
+      "name": "Selesai",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3560,
+        100
+      ]
+    },
+    {
+      "id": "http-agent-error-fallback",
+      "name": "Kirim Fallback Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2900,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/waha/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Accept').item.json.chat_id || $('Filter Event').item.json.payload.from, phone_e164: $('Accept').item.json.phone_e164 || null, body: ($json.error && (String($json.error).toLowerCase().includes('too many requests') || String($json.error).toLowerCase().includes('rate limit')) ? 'Batas kuota harian model LLM terlampaui (Rate Limit). Silakan pilih model lain atau tambah kuota di menu Integrasi.' : 'Maaf, ada kendala saat memproses permintaan Anda. Silakan coba lagi sebentar lagi.'), trigger_type: 'CHAT_MASUK' }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "if-accept-status",
+      "name": "Accept Sukses?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-accept",
+              "leftValue": "={{ Boolean($json.accept === true) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "switch-role",
+      "name": "Switch Role",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        880,
+        300
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.role || 'OWNER' }}",
+                    "rightValue": "OWNER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.role }}",
+                    "rightValue": "CUSTOMER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "http-customer-handle",
+      "name": "Customer Handle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/customer/handle",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ customer_phone: $('Accept').item.json.customer_phone || $('Accept').item.json.phone_e164 || $('Filter Event').item.json.payload.from, message_text: $('Filter Event').item.json.payload.body || '', message_id: $('Filter Event').item.json.payload.id || null, from_me: $('Filter Event').item.json.payload.fromMe === true, intent: $('Accept').item.json.intent || null }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "split-replies",
+      "name": "Split Out Replies",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        100
+      ],
+      "parameters": {
+        "fieldToSplitOut": "replies",
+        "options": {}
+      }
+    },
+    {
+      "id": "format-waha-chatid",
+      "name": "Format WAHA ChatId",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        100
+      ],
+      "parameters": {
+        "jsCode": "const items = $input.all();\nreturn items.map(item => {\n  const rawPhone = item.json.phone_e164 || item.json.to || '';\n  const cleanDigits = String(rawPhone).replace(/\\D/g, '');\n  return {\n    json: {\n      phone_e164: rawPhone,\n      chat_id: item.json.chat_id || (cleanDigits ? cleanDigits + '@c.us' : ''),\n      body: item.json.body || item.json.text || '',\n      trigger_type: item.json.trigger_type || 'CUSTOMER_REPLY'\n    }\n  };\n});"
+      }
+    },
+    {
+      "id": "tool-orders",
+      "name": "tool_get_orders",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        2600,
+        320
+      ],
+      "parameters": {
+        "toolDescription": "Gunakan tool ini ketika pengguna (owner) bertanya tentang pesanan pelanggan, orderan masuk, daftar pesanan buket/dekor, atau status pesanan klien (contoh: 'ada pesanan apa', 'cek orderan masuk', 'daftar pesanan minggu ini').",
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/tools/get-orders",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    },
+    {
+      "id": "tool-update-order",
+      "name": "tool_update_order",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        2740,
+        480
+      ],
+      "parameters": {
+        "toolDescription": "Gunakan tool ini ketika Owner meminta menandai pesanan selesai (MARK_COMPLETED), mengubah jadi lunas (MARK_PAID), selesai dan lunas (COMPLETE_AND_PAY), sedang dikerjakan (MARK_IN_PROGRESS), membatalkan pesanan (CANCEL), atau menghapus pesanan (DELETE). Jika owner meminta menyelesaikan SEMUA/seluruh pesanan, gunakan order_id: 'ALL'. JANGAN gunakan tool_update_todo_status untuk pesanan!",
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/tools/update-order",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "parametersBody": {
+          "values": [
+            {
+              "name": "order_id",
+              "valueProvider": "modelRequired"
+            },
+            {
+              "name": "action",
+              "valueProvider": "modelRequired"
+            },
+            {
+              "name": "notes",
+              "valueProvider": "modelOptional"
+            }
+          ]
+        },
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "order_id",
+              "description": "ID pesanan seperti #ORD-504D0BA0, nama pemesan, atau 'ALL' / 'SEMUA' untuk menandai seluruh pesanan aktif sekaligus",
+              "type": "string"
+            },
+            {
+              "name": "action",
+              "description": "Pilihan aksi: MARK_COMPLETED, MARK_PAID, COMPLETE_AND_PAY, MARK_IN_PROGRESS, MARK_DP, CANCEL, DELETE",
+              "type": "string"
+            },
+            {
+              "name": "notes",
+              "description": "Catatan penyelesaian atau alasan pembatalan",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "botseriInternalApi",
+          "name": "Botseri Internal API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Filter Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Event": {
+      "main": [
+        [
+          {
+            "node": "Accept",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept": {
+      "main": [
+        [
+          {
+            "node": "Accept Sukses?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ada Balasan Langsung?": {
+      "main": [
+        [
+          {
+            "node": "Kirim Balasan Langsung",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Diterima?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Balasan Langsung": {
+      "main": [
+        [
+          {
+            "node": "Selesai Tanpa Balasan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diterima?": {
+      "main": [
+        [
+          {
+            "node": "Voice Note?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Selesai Tanpa Balasan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Voice Note?": {
+      "main": [
+        [
+          {
+            "node": "Unduh Audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unduh Audio": {
+      "main": [
+        [
+          {
+            "node": "Transkripsi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transkripsi": {
+      "main": [
+        [
+          {
+            "node": "Simpan Transkrip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simpan Transkrip": {
+      "main": [
+        [
+          {
+            "node": "Teks Transkrip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Teks Transkrip": {
+      "main": [
+        [
+          {
+            "node": "Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Context": {
+      "main": [
+        [
+          {
+            "node": "Susun Input Agen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Susun Input Agen": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Botseri Gateway": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_create_todo_and_order": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_get_prioritized_todos": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_update_todo_status": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_update_todo": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Pecah Pesan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Kirim Fallback Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Fallback Error": {
+      "main": [
+        [
+          {
+            "node": "Selesai Tanpa Balasan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pecah Pesan": {
+      "main": [
+        [
+          {
+            "node": "Kirim WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Selesai",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept Sukses?": {
+      "main": [
+        [
+          {
+            "node": "Switch Role",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Selesai Tanpa Balasan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Role": {
+      "main": [
+        [
+          {
+            "node": "Ada Balasan Langsung?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Customer Handle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Customer Handle": {
+      "main": [
+        [
+          {
+            "node": "Split Out Replies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out Replies": {
+      "main": [
+        [
+          {
+            "node": "Format WAHA ChatId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format WAHA ChatId": {
+      "main": [
+        [
+          {
+            "node": "Kirim WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_get_orders": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_update_order": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

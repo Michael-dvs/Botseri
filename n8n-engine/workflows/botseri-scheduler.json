@@ -1,0 +1,266 @@
+{
+  "id": "botseriScheduler01",
+  "name": "Botseri Scheduler",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": false,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "executionTimeout": 900
+  },
+  "nodes": [
+    {
+      "id": "schedule-1m",
+      "name": "Setiap 1 Menit",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 1 }]
+        }
+      }
+    },
+    {
+      "id": "http-tick",
+      "name": "Tick",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/scheduler/tick",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": { "timeout": 60000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "botseriInternalApi", "name": "Botseri Internal API" }
+      }
+    },
+    {
+      "id": "if-jobs",
+      "name": "Ada Job?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "id": "jobs-present",
+              "leftValue": "={{ $json.jobs?.length || 0 }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "split-jobs",
+      "name": "Split Job",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [660, 220],
+      "parameters": {
+        "fieldToSplitOut": "jobs",
+        "options": {}
+      }
+    },
+    {
+      "id": "if-alarm",
+      "name": "Apakah Alarm?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 220],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "id": "is-alarm-condition",
+              "leftValue": "={{ $json.job_type === 'TASK_ALARM' || $json.skip_llm === true }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-send-alarm",
+      "name": "Kirim WhatsApp Alarm",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 100],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DASHBOARD_URL || 'http://botseri-dashboard:3000') + '/api/internal/waha/send' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.target_chat_id || $json.chat_id, body: $json.body || $json.fallback_text, trigger_type: 'WORK_HOURS_REMINDER', idempotency_key: $json.job_id }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "botseriInternalApi", "name": "Botseri Internal API" }
+      }
+    },
+    {
+      "id": "status-alarm",
+      "name": "Status Hasil Alarm",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1380, 100],
+      "parameters": {
+        "jsCode": "const job = $('Apakah Alarm?').item.json;\nconst sent = $json?.ok === true && !$json?.error;\nconst error = sent ? undefined : String($json?.error?.message || $json?.error || $json?.message || 'Pengiriman WhatsApp gagal').slice(0, 2000);\nreturn [{ json: { job_id: job.job_id, status: sent ? 'SENT' : 'FAILED', body: sent ? (job.body || job.fallback_text) : undefined, error, text_source: 'alarm' } }];"
+      }
+    },
+    {
+      "id": "http-llm",
+      "name": "LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 320],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DASHBOARD_URL || 'http://botseri-dashboard:3000') + '/api/internal/llm/v1/chat/completions' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'botseri-default', messages: $('Apakah Alarm?').item.json.messages, temperature: 0.4, max_tokens: 1000 }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "botseriInternalApi", "name": "Botseri Internal API" }
+      }
+    },
+    {
+      "id": "choose-text",
+      "name": "Pilih Teks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1380, 320],
+      "parameters": {
+        "jsCode": "const job = $('Apakah Alarm?').item.json;\nconst content = $json?.choices?.[0]?.message?.content;\nconst valid = !$json?.error && typeof content === 'string' && content.trim().length > 0;\nconst text = String(valid ? content : (job.body || job.fallback_text)).trim().replace(/\\u2014/g, ' · ');\nreturn [{ json: { job, text, source: valid ? 'llm' : 'fallback' } }];"
+      }
+    },
+    {
+      "id": "http-send-macro",
+      "name": "Kirim WhatsApp Makro",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1600, 320],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DASHBOARD_URL || 'http://botseri-dashboard:3000') + '/api/internal/waha/send' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Pilih Teks').item.json.job.target_chat_id || $('Pilih Teks').item.json.job.chat_id, body: $('Pilih Teks').item.json.text, trigger_type: $('Pilih Teks').item.json.job.job_type, idempotency_key: $('Pilih Teks').item.json.job.job_id }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "botseriInternalApi", "name": "Botseri Internal API" }
+      }
+    },
+    {
+      "id": "status-macro",
+      "name": "Status Hasil Makro",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1820, 320],
+      "parameters": {
+        "jsCode": "const chosen = $('Pilih Teks').item.json;\nconst sent = $json?.ok === true && !$json?.error;\nconst error = sent ? undefined : String($json?.error?.message || $json?.error || $json?.message || 'Pengiriman WhatsApp gagal').slice(0, 2000);\nreturn [{ json: { job_id: chosen.job.job_id, status: sent ? 'SENT' : 'FAILED', body: sent ? chosen.text : undefined, error, text_source: chosen.source } }];"
+      }
+    },
+    {
+      "id": "http-result",
+      "name": "Lapor Hasil",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2060, 220],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DASHBOARD_URL || 'http://botseri-dashboard:3000') + '/api/internal/scheduler/jobs/' + encodeURIComponent($json.job_id) + '/result' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: $json.status, error: $json.error, body: $json.body }) }}",
+        "options": { "timeout": 15000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "botseriInternalApi", "name": "Botseri Internal API" }
+      }
+    },
+    {
+      "id": "noop-none",
+      "name": "Tidak Ada Job",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [660, 400],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Setiap 1 Menit": {
+      "main": [[{ "node": "Tick", "type": "main", "index": 0 }]]
+    },
+    "Tick": {
+      "main": [[{ "node": "Ada Job?", "type": "main", "index": 0 }]]
+    },
+    "Ada Job?": {
+      "main": [
+        [{ "node": "Split Job", "type": "main", "index": 0 }],
+        [{ "node": "Tidak Ada Job", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split Job": {
+      "main": [[{ "node": "Apakah Alarm?", "type": "main", "index": 0 }]]
+    },
+    "Apakah Alarm?": {
+      "main": [
+        [{ "node": "Kirim WhatsApp Alarm", "type": "main", "index": 0 }],
+        [{ "node": "LLM", "type": "main", "index": 0 }]
+      ]
+    },
+    "Kirim WhatsApp Alarm": {
+      "main": [[{ "node": "Status Hasil Alarm", "type": "main", "index": 0 }]]
+    },
+    "Status Hasil Alarm": {
+      "main": [[{ "node": "Lapor Hasil", "type": "main", "index": 0 }]]
+    },
+    "LLM": {
+      "main": [[{ "node": "Pilih Teks", "type": "main", "index": 0 }]]
+    },
+    "Pilih Teks": {
+      "main": [[{ "node": "Kirim WhatsApp Makro", "type": "main", "index": 0 }]]
+    },
+    "Kirim WhatsApp Makro": {
+      "main": [[{ "node": "Status Hasil Makro", "type": "main", "index": 0 }]]
+    },
+    "Status Hasil Makro": {
+      "main": [[{ "node": "Lapor Hasil", "type": "main", "index": 0 }]]
+    }
+  }
+}

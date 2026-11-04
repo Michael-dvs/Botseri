@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Quality Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    env:
+      DATABASE_URL: "postgresql://dummy_user:dummy_password@localhost:5432/dummy_db"
+      SESSION_SECRET: "ci_dummy_session_secret_for_build_purposes_only_32_chars"
+      ENCRYPTION_KEY: "Y2ktZHVtbXktZW5jcnlwdGlvbi1rZXktMzJieXRlcw=="
+      INTERNAL_API_TOKEN: "ci_dummy_internal_api_token"
+      PUBLIC_BASE_URL: "https://panel.example.com"
+      WAHA_API_KEY: "ci_dummy_waha_api_key"
+      WAHA_SESSION: "default"
+      TZ_DEFAULT: "Asia/Jakarta"
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: Prisma validate
+        run: npx prisma validate
+
+      - name: ESLint check
+        run: npm run lint
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit test suite
+        run: npm test -- --run
+
+      - name: Next.js standalone build
+        run: npm run build
+
+      - name: Validate n8n workflows
+        working-directory: .
+        run: ./scripts/validate-workflows.sh
+
+      - name: Lint shell scripts with shellcheck
+        working-directory: .
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck scripts/*.sh
+          else
+            sudo apt-get update && sudo apt-get install -y shellcheck
+            shellcheck scripts/*.sh
+          fi
+
+      - name: Check script permissions in git
+        working-directory: .
+        run: |
+          for script in scripts/*.sh; do
+            if [ -x "$script" ]; then
+              echo "Executable OK: $script"
+            else
+              echo "Error: $script tidak executable" >&2
+              exit 1
+            fi
+          done
+
+  images:
+    name: Build Docker Images
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build botseri-dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./dashboard
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build botseri-n8n image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./n8n-engine
+          build-args: |
+            N8N_VERSION=1.64.1
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

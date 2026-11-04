@@ -1,0 +1,1241 @@
+# Log Pembaruan Botseri (Updates Log)
+
+Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, komponen antarmuka, dan hasil verifikasi pengujian.
+
+---
+
+## [2026-10-27] Automated Multi-Provider LLM Model Discovery, Catalog Sync, & Metadata Auto-Fill
+
+### 1. Ringkasan Fitur
+Menggantikan formulir penambahan model LLM manual pada `/integrations` dengan sistem **Automated Model Catalog & Discovery** terinspirasi dari antarmuka terminal `omp`:
+- Pengguna memilih provider (`OPENROUTER`, `OPENAI`, `GEMINI`, `ANTHROPIC`, `CUSTOM_OPENAI_COMPAT`).
+- Tombol **"Buka Katalog Model"** / **"Tarik Model"** memicu endpoint internal Next.js untuk menarik katalog model secara otomatis langsung dari API resmi provider atau katalog terkurasi.
+- Komponen dialog modal utilitarian (`ModelPickerModal.tsx`) menampilkan daftar model scannable dengan font monospaced, badge context window (`128k ctx`, `1m ctx`), badge kapabilitas (`Vision`, `Tools`, `Audio`, `Reasoning`), filter kategori (`Semua`, `Chat`, `Vision`, `Audio / STT`, `Gratis (Free)`, `Reasoning`), dan estimasi biaya input/output per 1M token.
+- Saat salah satu model dipilih, formulir terisi otomatis (`model_name`, `max_output_tokens`, `price_input_per_mtok`, `price_output_per_mtok`, rekomendasi `stt_model`, serta default `temperature: 0.2`).
+- Toggle **"Input Manual"** tersedia sebagai fallback jika pengguna menggunakan model custom atau jaringan lokal tanpa koneksi katalog publik.
+
+---
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/llm-gateway/pricing-tables.ts` | Baru | Tabel referensi statis terkurasi metadata konteks, harga per 1M token, kapabilitas, dan rekomendasi model STT untuk OpenAI, Google Gemini, dan Anthropic Claude. |
+| `dashboard/src/lib/llm-gateway/catalog.ts` | Baru | Modul penarik katalog multi-provider (`fetchOpenRouterCatalog`, `fetchOpenAiCatalog`, `fetchGeminiCatalog`, `fetchAnthropicCatalog`, `fetchCustomCatalog`) dengan normalisasi ke kontrak `UnifiedModelCatalogItem`. |
+| `dashboard/src/app/api/llm/catalog/route.ts` | Baru | Route handler `POST /api/llm/catalog` terproteksi sesi admin (`getSession()`) dan enkripsi (`decryptSecret`) untuk menarik katalog model tanpa mencatat API key di URL query log. |
+| `dashboard/src/app/(app)/integrations/ModelPickerModal.tsx` | Baru | Komponen dialog pemilih model utilitarian berstandar antislop: bebas em dash, target sentuh >= 44px, pencarian teks instan, filter kategori, badge kapabilitas monospaced, dan responsif mobile. |
+| `dashboard/src/app/(app)/integrations/IntegrationsPanel.tsx` | Modifikasi | Mengintegrasikan tombol pemicu katalog, modal pemilih model, chip informasi model terpilih, auto-fill input formulir, dan toggle input manual. |
+| `dashboard/tests/unit/catalog.test.ts` | Baru | 9 skenario tes unit Vitest mencakup adapter OpenRouter, OpenAI, Gemini, Anthropic, Custom, dan master dispatcher `fetchModelCatalog`. |
+| `updates.md` | Baru | Berkas catatan log kronologis pembaruan proyek. |
+
+---
+
+### 3. Kontrak Data Model Terstandarisasi
+
+```typescript
+export interface UnifiedModelCatalogItem {
+  id: string; // contoh: "openai/gpt-4o-mini", "gemini-2.5-flash", "claude-3-5-sonnet-latest"
+  name: string;
+  provider: 'OPENROUTER' | 'OPENAI' | 'GEMINI' | 'ANTHROPIC' | 'CUSTOM_OPENAI_COMPAT';
+  context_length: number;
+  max_output_tokens: number;
+  pricing: {
+    input_per_mtok_usd: number;
+    output_per_mtok_usd: number;
+    is_free: boolean;
+  };
+  capabilities: {
+    vision: boolean;
+    audio_stt: boolean;
+    function_calling: boolean;
+    reasoning: boolean;
+  };
+  recommended_stt_model?: string;
+  description?: string;
+}
+```
+
+---
+
+### 4. Hasil Verifikasi & Uji Coba
+
+1. **Unit Test Suite (Vitest):**
+   - 19 test files, **161 passed** (100% lulus, 0 gagal).
+   - `tests/unit/catalog.test.ts`: 9 tests passed dalam 12ms.
+2. **TypeScript Typecheck:**
+   - `npx tsc --noEmit`: Lulus bersih dengan 0 error.
+3. **ESLint:**
+   - `npm run lint` (`next lint`): Lulus bersih dengan 0 warning dan 0 error.
+4. **Next.js Standalone Build:**
+   - `npm run build`: Berhasil mengompilasi seluruh 25 route, termasuk `POST /api/llm/catalog` sebagai route dynamic (`ƒ`).
+5. **Uji Langsung Endpoint via curl (Docker Container Live):**
+   - Unauthorized (tanpa sesi cookie): HTTP 401.
+   - OpenRouter Live Fetch: HTTP 200, 464 model publik terindeks lengkap dengan tarif per 1M token dan kapabilitas.
+   - OpenAI Curated Fetch: HTTP 200, 9 model terkurasi (`gpt-4o-mini`, `gpt-4o`, `o1`, `o3-mini`, dsb.) dengan harga terisi akurat.
+   - Google Gemini Curated Fetch: HTTP 200, 8 model terkurasi dengan konteks hingga 2M token dan audio native.
+   - Anthropic Claude Curated Fetch: HTTP 200, 7 model terkurasi dengan rekomendasi STT `whisper-1`.
+6. **Kepatuhan Invarian & Keamanan:**
+   - `INV-01` & `INV-02`: Kredensial tersimpan didekripsi aman di memori server tanpa terekspos ke klien.
+   - `INV-08`: Proteksi Cloudflare 404 pada rute internal tetap aktif (terbukti via `./scripts/smoke.sh` 8/8 PASS).
+   - `antislop.md` R-02: 0 karakter em dash pada seluruh berkas yang dibuat atau dimodifikasi.
+
+---
+
+## [2026-10-27] UI Refactoring: Formulir LLM Ringkas dengan Progressive Disclosure
+
+### 1. Ringkasan Perubahan
+Memadatkan formulir penambahan konfigurasi LLM baru pada halaman `/integrations` dengan pola **Progressive Disclosure**:
+- **Tampilan Default Ringkas:** Pengguna hanya dihadapkan pada 3 kolom utama:
+  1. **Provider:** Dropdown pilihan penyedia layanan (`OpenRouter`, `OpenAI`, `Google Gemini`, `Anthropic Claude`, `Custom OpenAI-Compat`).
+  2. **Model Terpilih (Katalog Trigger):**
+     - Saat model belum dipilih: Tombol bersahaja `[ ⌕ Buka Katalog Model ]` selebar kolom dengan font monospaced.
+     - Saat model sudah dipilih: Kartu status ringkas menampilkan ID model, badge konteks (`128k ctx`), tarif per 1M token, dan tombol `[ Ganti Model ]`.
+  3. **API Key (Rahasia):** Input password dengan placeholder kontekstual sesuai format key provider (`sk-or-v1-...`, `sk-proj-...`, `AIzaSy...`, `sk-ant-api03-...`, atau `sk-...`).
+  4. Jika provider custom dipilih: Kolom Base URL otomatis tampil mendampingi API Key pada baris kedua.
+- **Panel Pengaturan Lanjutan (Accordion / Collapsible):**
+  - Tombol toggle utilitarian `[ ▸ Pengaturan Lanjutan & Override Biaya ]` (tertutup secara default).
+  - Saat dibuka: Menampilkan grid 2 baris berisi parameter teknis: `Base URL (Opsional)`, `Model STT Audio`, `Temperature` (default 0.2), `Maks Output Tokens`, `Harga Input per 1M Tok`, dan `Harga Output per 1M Tok`.
+  - Nilai di dalam panel tetap tersinkronisasi otomatis saat model dipilih dari katalog, namun pengguna bebas mengubahnya bila diperlukan.
+  - Input `max_output_tokens` otomatis dibatasi maksimal 8000 agar mematuhi batasan skema validasi API.
+- **Mode Input Manual (Fallback):**
+  - Tautan teks `[ Masukkan Model Secara Manual ]` / `[ Kembali ke Mode Katalog ]`.
+  - Saat diaktifkan: Tombol katalog berubah menjadi input teks standar `Nama Model (Input Manual)` dan panel Pengaturan Lanjutan terbuka secara otomatis.
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/(app)/integrations/IntegrationsPanel.tsx` | Modifikasi | Refactoring formulir konfigurasi LLM: tata letak 3 kolom ringkas, tombol katalog terintegrasi, kartu chip model, accordion pengaturan lanjutan, placeholder API key cerdas, pembatasan max tokens 8000, dan toggle mode manual. |
+| `updates.md` | Modifikasi | Pencatatan kronologis rincian perubahan Progressive Disclosure. |
+
+### 3. Hasil Verifikasi
+1. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus 100% dengan 0 error dan 0 warning.
+2. **Unit Test Suite:** 19 test file, 161 test cases lulus tanpa regresi.
+3. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+4. **Uji Penyimpanan Konfigurasi:** Pembuatan konfigurasi LLM via `POST /api/llm/configs` teruji sukses menyimpan data ke PostgreSQL dengan enkripsi AES-256-GCM.
+5. **Antislop R-02:** 0 karakter em dash pada seluruh komponen teks UI.
+6. **Target Sentuh & Aksesibilitas:** Seluruh kontrol tombol dan input memiliki tinggi sentuh minimal 44px (`min-h-[44px]`).
+
+---
+
+## [2026-10-27] Authorized Numbers Management Dashboard & Fix Multi-Owner Reminder Bug
+
+### 1. Ringkasan Perbaikan & Fitur
+- **Akar Masalah Bug Reminder:** Saat dua nomor berbeda dipairing sebagai owner, keduanya memiliki `is_owner: true`. Modul scheduler sebelumnya melakukan `findFirst({ where: { is_owner: true }, orderBy: { id: 'asc' } })` yang memilih nomor secara sembarangan berdasarkan urutan UUID sehingga pengingat to-do terkirim ke nomor lama.
+- **Solusi Skema & Logika:**
+  - Menambahkan kolom `is_primary Boolean @default(false)` dan `updated_at DateTime @default(now()) @updatedAt` pada tabel `authorized_numbers`.
+  - Menambahkan helper `getPrimaryOwner()` di `src/lib/scheduler/queries.ts`: memprioritaskan nomor dengan `is_owner: true AND is_primary: true`, dengan fallback ke nomor owner yang paling terakhir aktif (`updated_at: 'desc'`).
+  - Mengintegrasikan `getPrimaryOwner()` pada `tick.ts` dan route hasil job scheduler `[jobId]/result/route.ts`.
+  - Saat alur pairing nomor baru dijalankan (`/api/internal/inbound/accept`), jika belum ada nomor pemilik utama, nomor yang baru dipairing otomatis menjadi `is_primary: true`.
+- **Manajemen Nomor di Dashboard:**
+  - Endpoint baru:
+    - `GET /api/authorized-numbers`: Mengembalikan daftar nomor terurut berdasarkan `is_primary DESC, created_at DESC`.
+    - `PATCH /api/authorized-numbers/[id]`: Mengubah label dan mengubah status `is_primary` (dengan transaksi atomik mereset nomor lain menjadi non-primary).
+    - `DELETE /api/authorized-numbers/[id]`: Mencabut akses otorisasi nomor, mencegah penghapusan jika hanya tersisa 1 nomor owner (HTTP 400), dan otomatis mempromosikan nomor owner tersisa jika yang dihapus adalah primary.
+  - Komponen antarmuka `AuthorizedNumbersList.tsx` pada halaman `/integrations`: tabel dan kartu responsif dengan format monospace, badge "Pemilik Utama" (aksen solid) dan "Pemilik Tambahan" (outline netral), edit label inline, tombol `[ Jadikan Utama ]`, dan konfirmasi modal/popover sebelum mencabut izin.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/prisma/schema.prisma` | Modifikasi | Menambahkan field `is_primary Boolean @default(false)` dan `updated_at DateTime @default(now()) @updatedAt` pada model `AuthorizedNumber`. |
+| `dashboard/prisma/migrations/20261027140000_add_is_primary_to_authorized_numbers/migration.sql` | Baru | Migrasi SQL DDL maju dan data backfill menandai nomor owner pertama sebagai primary. |
+| `dashboard/src/lib/scheduler/queries.ts` | Modifikasi | Menambahkan fungsi `getPrimaryOwner()` deterministik. |
+| `dashboard/src/lib/scheduler/tick.ts` | Modifikasi | Menggunakan `getPrimaryOwner()` untuk memilih nomor target brief, reminder, dan evaluasi harian. |
+| `dashboard/src/app/api/internal/scheduler/jobs/[jobId]/result/route.ts` | Modifikasi | Menggunakan `getPrimaryOwner()` saat mencatat pesan keluar hasil eksekusi job. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Mengatur `is_primary: true` secara otomatis saat nomor owner pertama dipairing. |
+| `dashboard/src/app/api/authorized-numbers/route.ts` | Baru | Route handler `GET /api/authorized-numbers` terproteksi sesi JWT admin. |
+| `dashboard/src/app/api/authorized-numbers/[id]/route.ts` | Baru | Route handler `PATCH` dan `DELETE` dengan transaksi atomik dan proteksi minimal 1 owner tersisa. |
+| `dashboard/src/app/(app)/integrations/AuthorizedNumbersList.tsx` | Baru | Komponen antarmuka utilitarian responsif daftar nomor, badge peran, edit label inline, dan tombol aksi. |
+| `dashboard/src/app/(app)/integrations/IntegrationsPanel.tsx` | Modifikasi | Mengintegrasikan `AuthorizedNumbersList` di bawah kartu pairing WhatsApp bot. |
+| `dashboard/src/app/(app)/integrations/page.tsx` | Modifikasi | Mengambil data awal `initialAuthorizedNumbers` dari database dan meneruskannya ke panel integrasi. |
+| `dashboard/tests/unit/authorized-numbers.test.ts` | Baru | 3 skenario tes unit untuk resolusi `getPrimaryOwner` dan fallback. |
+| `updates.md` | Modifikasi | Pencatatan kronologis perbaikan multi-owner bug dan modul manajemen nomor terotorisasi. |
+
+### 3. Hasil Verifikasi
+1. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus 100% (0 error, 0 warning).
+2. **Unit Test Suite:** 20 test file, **164 test cases** (100% passed).
+3. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+4. **Verifikasi Live Database & Bug:**
+   - Dua nomor terdaftar di database (`+6289699898458` dan `+6287881820571`).
+   - Saat Nomor A dijadikan primary via PATCH: Nomor A menjadi `is_primary: true`, Nomor B otomatis menjadi `is_primary: false`. `getPrimaryOwner()` secara deterministik mengembalikan chat ID Nomor A.
+   - Saat Nomor B dijadikan primary via PATCH: `getPrimaryOwner()` seketika beralih mengembalikan chat ID Nomor B.
+   - Saat mencoba menghapus satu-satunya nomor owner tersisa: API mengembalikan HTTP 400 "Minimal satu nomor pemilik wajib tersisa."
+5. **Antislop R-02:** 0 karakter em dash pada seluruh komponen teks UI dan berkas baru/modifikasi.
+6. **Target Sentuh Minimal 44px:** Seluruh tombol aksi `[ Jadikan Utama ]`, `[ Cabut Izin ]`, dan kontrol form memenuhi standar ukuran sentuh.
+
+---
+
+## [2026-10-27] Modular Order Management Toggle (Open-Source Curated Mode: Personal To-Do vs UMKM Commerce)
+
+### 1. Ringkasan Fitur
+Menjadikan modul **Pesanan Pelanggan (`Orders`)** bersifat modular dan opsional melalui konfigurasi `enable_orders` pada `bot_settings`:
+- **Mode Default (UMKM Commerce, `enable_orders = true`):**
+  - Tab navigasi **Pesanan** (`/orders`) ditampilkan di header dashboard.
+  - Tombol cepat **Catat pesanan** ditampilkan pada ringkasan `/dashboard`.
+  - Prompt sistem memuat instruksi lengkap ekstraksi pesanan pelanggan (`tool_create_todo_and_order`).
+- **Mode Produktivitas Personal / Open-Source (`enable_orders = false`):**
+  - Tab navigasi **Pesanan** otomatis disembunyikan dari bilah navigasi utama (`AppNav.tsx`).
+  - Tombol **Catat pesanan** pada halaman `/dashboard` otomatis disembunyikan.
+  - Mengakses rute `/orders` secara langsung menyajikan panel status utilitarian yang bersih: "Modul Pesanan Sedang Dinonaktifkan" lengkap dengan tombol `[ Buka Pengaturan ]`.
+  - Kompilator prompt (`compileSystemPrompt`) secara otomatis menghapus instruksi pencatatan order pelanggan dan mengalihkan instruksi agen murni ke pengelolaan to-do operasional, menghemat kuota token LLM dan meningkatkan akurasi agen.
+  - Endpoint internal `create-todo-and-order` secara aman mengabaikan pembuatan baris di tabel `orders` tanpa menggagalkan penyimpanan `todos`.
+- **Pengaturan & Bootstrap:**
+  - Setup wizard (`/setup` & `POST /api/setup`): Pengguna dapat menentukan mode operasional sejak awal bootstrap melalui checkbox "Aktifkan Modul Pesanan Pelanggan (Khusus UMKM / Jasa)".
+  - Pengaturan Dashboard (`/settings` & `PUT /api/settings`): Kontrol toggle/checkbox utilitarian "Aktifkan Modul Pesanan Pelanggan (Orders)". Setiap penyimpanan otomatis mengompilasi ulang prompt sistem, menaikkan versi prompt, dan merefresh navigasi.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/prisma/schema.prisma` | Modifikasi | Menambahkan field `enable_orders Boolean @default(true)` pada model `BotSettings`. |
+| `dashboard/prisma/migrations/20261027150000_add_enable_orders_to_bot_settings/migration.sql` | Baru | Migrasi SQL DDL maju menambahkan kolom `enable_orders`. |
+| `dashboard/prisma/seed.cjs` | Modifikasi | Menyertakan `enable_orders: true` sebagai nilai default awal pada data seed. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Pembersihan karakter em dash pada contoh format chat masuk. |
+| `dashboard/src/lib/prompt/compiler.ts` | Modifikasi | Menambahkan adaptasi kalimat instruksi prompt saat `settings.enable_orders === false`. |
+| `dashboard/src/app/api/internal/tools/create-todo-and-order/route.ts` | Modifikasi | Penjagaan aman mengabaikan pembuatan `orders` saat `settings.enable_orders === false`. |
+| `dashboard/src/app/api/settings/route.ts` | Modifikasi | Menambahkan validasi Zod `enable_orders: z.boolean().optional()` pada PUT handler. |
+| `dashboard/src/app/api/setup/route.ts` | Modifikasi | Menambahkan `enable_orders` pada skema setup bootstrap. |
+| `dashboard/src/app/setup/page.tsx` | Modifikasi | Menambahkan kontrol checkbox aktivasi modul pesanan pada halaman setup. |
+| `dashboard/src/app/(app)/layout.tsx` | Modifikasi | Meneruskan `enableOrders={settings.enable_orders}` ke `AppNav`. |
+| `dashboard/src/components/AppNav.tsx` | Modifikasi | Menyaring tab navigasi `/orders` bila `enableOrders === false`. |
+| `dashboard/src/app/(app)/settings/SettingsForm.tsx` | Modifikasi | Menambahkan toggle checkbox "Aktifkan Modul Pesanan Pelanggan (Orders)" di bagian Profil Usaha. |
+| `dashboard/src/app/(app)/settings/page.tsx` | Modifikasi | Meneruskan nilai `enable_orders` ke form pengaturan. |
+| `dashboard/src/app/(app)/orders/page.tsx` | Modifikasi | Menampilkan panel status modul nonaktif dengan tautan ke `/settings` saat `enable_orders === false`. |
+| `dashboard/src/app/(app)/dashboard/page.tsx` | Modifikasi | Menyembunyikan tombol "Catat pesanan" saat `enable_orders === false`. |
+| `dashboard/tests/unit/prompt.test.ts` | Modifikasi | Menambahkan unit test perbandingan output `compileSystemPrompt` untuk `enable_orders: true` vs `false`. |
+| `updates.md` | Modifikasi | Pencatatan kronologis fitur modular order management toggle. |
+
+### 3. Hasil Verifikasi
+1. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus 100% (0 error, 0 warning).
+2. **Unit Test Suite:** 20 test file, **165 test cases** (100% lulus, termasuk tes adaptasi prompt `enable_orders`).
+3. **Next.js Standalone Build:** `npm run build` sukses mengompilasi seluruh route.
+4. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+5. **Verifikasi Live E2E:**
+   - Saat `enable_orders: false` via API:
+     - DB terupdate `enable_orders = f`.
+     - `compiled_prompt_version` meningkat dari 9 ke 10.
+     - Teks "mencatat pesanan" hilang dari compiled prompt di DB.
+     - Tab `/orders` hilang dari bilah navigasi `AppNav`.
+     - Tombol "Catat pesanan" hilang dari `/dashboard`.
+     - Mengakses `/orders` menampilkan pesan bersih "Modul Pesanan Sedang Dinonaktifkan" beserta tombol `[ Buka Pengaturan ]`.
+   - Saat dikembalikan ke `enable_orders: true`:
+     - Seluruh menu pesanan dan papan order kembali aktif normal.
+6. **Antislop R-02:** 0 karakter em dash pada seluruh komponen teks UI dan berkas modifikasi.
+7. **Aksesibilitas:** Seluruh kontrol tombol memiliki target sentuh minimal 44px (`min-h-[44px]`).
+
+---
+
+## [2026-10-27] Refactoring Inbound Agent Output Synthesis & Eliminating Generic Fallbacks
+
+### 1. Ringkasan Perbaikan
+Mengeliminasi kemunculan kalimat robotik generik "Permintaan Anda telah diproses." pada alur percakapan chat WhatsApp masuk (`CHAT_MASUK`):
+- **Akar Masalah:**
+  1. Sapaan murni ("Hi", "Halo", "Pagi"): Node LangChain Agent di n8n menghasilkan output pada `$json.text` atau `$json.output`, namun node pemecah pesan (`split-output`) sebelumnya hanya membaca `$json.output` dan langsung jatuh ke string fallback robotik jika `$json.output` kosong.
+  2. Pada guard WAHA (`dashboard/src/lib/waha/guard.ts`), kondisi `EMPTY_TEXT` mengembalikan fallbackText `"Permintaan Anda telah diproses."` yang kaku dan tidak kontekstual.
+  3. Template prompt sistem sebelumnya belum memiliki panduan eksplisit yang membedakan sapaan murni (tanpa memanggil tool) vs permintaan melihat tugas pending (wajib memanggil `tool_get_prioritized_todos`) vs konfirmasi setelah pemanggilan `tool_create_todo_and_order`.
+- **Solusi Teknis:**
+  - **Node n8n `split-output`:** Memperbarui ekstraksi output agen dengan membaca `$json.output || $json.text || ($json.message && $json.message.content) || ''`. Jika teks kosong, menggunakan fallback ramah: `"Halo! Ada tugas atau catatan baru yang ingin ditambahkan hari ini?"` alih-alih kalimat robotik.
+  - **Guard WAHA (`guard.ts`):** Mengganti fallback `EMPTY_TEXT` menjadi respons asisten yang natural dan proaktif.
+  - **Template Sistem (`base.id.md`):** Menambahkan 4 aturan eksplisit:
+    1. *Sapaan Murni:* Balas sapaan dengan ramah, singkat, dan tanyakan agenda/tugas tanpa memanggil tool.
+    2. *Permintaan Daftar Tugas Pending:* Wajib panggil `tool_get_prioritized_todos` dan sajikan 3 fokus utama serta tugas lainnya secara terstruktur.
+    3. *Konfirmasi Pencatatan Tugas Baru:* Sebutkan judul tugas, estimasi waktu, serta prioritasnya secara ringkas.
+    4. *Larangan Kalimat Robotik:* Melarang keras balasan generik "Permintaan Anda telah diproses".
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/waha/guard.ts` | Modifikasi | Mengganti string fallback `EMPTY_TEXT` menjadi sapaan asisten natural dan kontekstual. |
+| `dashboard/tests/unit/waha-guard.test.ts` | Modifikasi | Menambahkan pengujian unit untuk fallback `EMPTY_TEXT` dan pembersihan em dash. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Menambahkan panduan spesifik untuk sapaan murni, kueri to-do pending, konfirmasi tugas baru, dan larangan respons robotik. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Memperbarui node `split-output` (Pecah Pesan) untuk menangani `$json.output`, `$json.text`, dan `$json.message.content` dengan fallback ramah. |
+| `updates.md` | Modifikasi | Pencatatan kronologis refactoring output synthesis agen masuk. |
+
+### 3. Hasil Verifikasi
+1. **Validasi Workflow:** `./scripts/validate-workflows.sh` lulus bersih (2 file workflow terverifikasi memenuhi INV-01 dan INV-02).
+2. **Unit Test Suite:** 20 test file, **166 test cases** lulus 100% (termasuk tes baru `waha-guard.test.ts`).
+3. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+4. **Kompilasi Ulang Prompt:** Prompt sistem di database (`bot_settings`) berhasil dikompilasi ulang memuat seluruh aturan baru sapaan, kueri to-do, dan larangan kalimat robotik.
+5. **Aktivasi Workflow n8n:** Container `botseri-n8n` mendeteksi perubahan hash workflow pada start, mengimpor ulang, dan mengaktifkan `botseriInboundAgent01` secara otomatis.
+6. **Antislop R-02:** 0 karakter em dash pada seluruh berkas yang dimodifikasi.
+
+---
+
+## [2026-10-27] Critical Bugfix: Tool Execution Failures & Silent Fallback Loop Resolution
+
+### 1. Investigasi Akar Masalah
+Pesan fallback "Halo! Ada tugas atau catatan baru yang ingin ditambahkan hari ini?" muncul secara keliru saat pengguna meminta daftar tugas ("Lihat list prioritas aku dong", "Lihat list tugas akuu") atau mencatat tugas dengan waktu relatif ("Besok pagi aku harus ngejemur baju").
+
+Akar masalah yang ditemukan:
+1. **Kegagalan Endpoint `get-prioritized-todos`:**
+   - Endpoint sebelumnya hanya mendukung metode `POST` dan menolak metode `GET` (HTTP 405).
+   - Scope bawaan dibatasi secara kaku ke `TODAY` (`planned_date <= today`). Jika tidak ada tugas bertanggal hari ini (misalnya tugas aktif berencana besok), `focus` dan `rest` bernilai kosong (`[]`), sehingga agent LLM tidak melihat tugas aktif dan menghasilkan balasan kosong.
+   - Response JSON belum menyediakan properti eksplisit `top_focus` dan `remaining_todos` sebagaimana diharapkan prompt.
+2. **Kegagalan Validasi di `create-todo-and-order`:**
+   - `source_message_id` sebelumnya diwajibkan sebagai UUID ketat. Panggilan tool yang tidak menyertakan UUID menghasilkan HTTP 422 `VALIDATION_ERROR`.
+   - Ekstraksi waktu relatif seperti "besok pagi" tanpa jam eksplisit rentan gagal parsing ISO-8601 string, memicu penolakan request dengan HTTP 422.
+3. **Silent Fallback Loop di n8n:**
+   - Pada node `split-output` (Pecah Pesan), jika output agen kosong akibat kegagalan pemanggilan tool, n8n mengisinya dengan sapaan default, menciptakan ilusi bot merespons "sapaan" padahal user sedang meminta melihat tugas atau mencatat tugas.
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `dashboard/src/app/api/internal/tools/get-prioritized-todos/route.ts` | Modifikasi | Mendukung metode `POST` dan `GET`, default scope `ALL_ACTIVE`, menyertakan tugas `upcoming` jika `TODAY` kosong, mengembalikan struktur eksplisit `top_focus`, `remaining_todos`, `total_active`, serta pesan informatif saat tidak ada tugas aktif. |
+| `dashboard/src/app/api/internal/tools/create-todo-and-order/route.ts` | Modifikasi | Menambahkan fungsi `parseFlexibleDueAt` yang mengenali frasa waktu relatif Indonesia ("besok", "lusa", "hari ini", "pagi", "siang", "sore", "malam") dan mengonversinya ke zona waktu lokal (Asia/Jakarta) dengan default jam 08:00 jika jam tidak disebut. Menambahkan fallback otomatis `source_message_id` ke pesan inbound terakhir jika tidak disediakan. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Menambahkan instruksi tegas: jika pesan memuat permintaan melihat tugas, WAJIB memanggil `tool_get_prioritized_todos` dengan parameter kosong `{}` dan DILARANG menjawab dengan sapaan ulang. Menambahkan panduan waktu relatif "besok pagi" ke jam 08:00 lokal. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Memperbarui deskripsi `tool_get_prioritized_todos` dengan panduan wajib panggil saat meminta daftar tugas/prioritas. Memperbarui node `split-output` untuk mencatat warning di log kontainer dan menggunakan pesan jujur "Maaf, terjadi kendala saat memeriksa atau mencatat tugas..." jika terjadi kegagalan output. |
+| `updates.md` | Modifikasi | Pencatatan kronologis investigasi dan perbaikan bug tool execution. |
+
+### 3. Hasil Verifikasi
+1. **Uji Langsung `get-prioritized-todos` (cURL):**
+   - Request `POST /api/internal/tools/get-prioritized-todos` dengan body `{}`: HTTP 200 OK.
+   - Mengembalikan `top_focus` berisi tugas aktif (misal: "Lock in asah jam 7"), `total_active: 1`.
+   - Request `GET /api/internal/tools/get-prioritized-todos`: HTTP 200 OK dengan payload terstruktur.
+2. **Uji Langsung `create-todo-and-order` Tanggal Relatif (cURL):**
+   - Request: `{"todos":[{"title":"Ngejemur baju","due_at":"2026-10-28T08:00:00+07:00","has_specific_time":false}]}` tanpa `source_message_id`: HTTP 200 OK, tugas berhasil tersimpan di database.
+3. **Validasi Workflow n8n:** `./scripts/validate-workflows.sh` lulus bersih (2 workflow valid).
+4. **Unit Test Suite:** 20 test file, **166 test cases** lulus 100%.
+5. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+6. **Antislop R-02:** 0 karakter em dash pada seluruh berkas yang disentuh.
+
+---
+
+## [2026-10-27] Critical Bugfix: Defensive Payload Parsing on create_todo & n8n maxTokens Resolution
+
+### 1. Diagnosa Log & Investigasi Mendalam
+Berdasarkan inspeksi data eksekusi n8n (`execution_data` pada execution 132) saat pengguna mengirim pesan "Aku harus ngerjain tkmp malam ini":
+1. **Tool `create-todo-and-order` Sebenarnya Sukses Menyimpan Tugas:**
+   - Tool berhasil dieksekusi dan tugas `"Kerjakan TKMP"` (`id: 8370c1f3-ee3f-4d4e-9e09-b856fce4e7f9`) berhasil tersimpan di tabel `todos` PostgreSQL.
+2. **Akar Masalah Kegagalan Output (Token Truncation):**
+   - Setelah tool selesai dieksekusi, n8n memanggil LLM Gateway untuk kedua kalinya guna mensintesis teks balasan konfirmasi kepada pengguna.
+   - Node `Botseri Gateway` (`lmChatOpenAi`) di `botseri-inbound-agent.json` sebelumnya dibatasi secara kaku dengan `maxTokens: 600`.
+   - Model penalaran (seperti `nvidia/nemotron-3.5-super-vl:free` dan model sejenis) menghabiskan kuota 600 token untuk proses *internal thinking/chain-of-thought*, sehingga pemanggilan terpotong dengan `finish_reason: "length"` dan menghasilkan string teks kosong (`""`).
+   - Karena teks kosong, node `AI Agent` mengembalikan `{ output: "" }` yang kemudian memicu pesan kendala pada `split-output`.
+3. **Kerentanan Potensial Lainnya:**
+   - Pemanggilan `syncTodo(item.id)` sebelumnya tidak diisolasi dalam `try/catch`. Jika Google Calendar/Tasks mengalami penolakan otorisasi atau timeout jaringan, route akan melempar uncaught exception HTTP 500 dan menggagalkan seluruh response to-do.
+   - Input `priority_rank` berbentuk string (misal `"4"`, `"P2"`) rentan menghasilkan fallback yang tidak diharapkan.
+   - Objek `todos` berformat flat `{ title, due_at, ... }` atau single object `{ todos: { title: ... } }` memerlukan penanganan fleksibel tanpa melempar HTTP 422.
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `dashboard/src/lib/todos/create.ts` | Modifikasi | Memperbarui `resolvePriority` dan `resolveDueAt` agar tidak melempar uncaught error saat tanggal tidak valid atau priority stack kosong (fallback aman ke `dueAt: null`, `hasSpecificTime: false`, dan level prioritas default). |
+| `dashboard/src/app/api/internal/tools/create-todo-and-order/route.ts` | Modifikasi | Menambahkan fungsi `normalizePriorityRank` untuk mengonversi string `"P1"`, `"4"`, `"p2"` secara defensif ke integer 1 s/d 4. Mendukung format payload flat `{ title: ... }`, objek tunggal `{ todos: { title: ... } }`, dan array standar. Mengisolasi pemanggilan `syncTodo(item.id)` dalam blok `try/catch` mandiri agar kendala Google sync tidak menggagalkan to-do endpoint. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Menambahkan instruksi eksplisit kepada LLM: selalu gunakan format `due_at` berstandar ISO-8601 lengkap dengan offset zona waktu (contoh: `2026-10-27T22:00:00+07:00`), dan jika pengguna tidak menyebutkan jam pasti, set `due_at: null` dan `has_specific_time: false`. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Mengubah batas token `maxTokens` pada node `Botseri Gateway` dari 600 menjadi dinamis `={{ $('Context').item?.json?.max_output_tokens || 2048 }}` agar model leluasa menyelesaikan proses sintesis balasan tanpa terpotong `finish_reason: "length"`. |
+| `updates.md` | Modifikasi | Pencatatan kronologis investigasi log eksekusi n8n dan perbaikan parsing defensif. |
+
+### 3. Hasil Verifikasi
+1. **Uji cURL Terminal Terhadap Berbagai Format Input:**
+   - Format string priority rank `"4"` dengan tanggal ISO: HTTP 200 OK (`priority_rank: 4`, `priority_label: "Rutin"`).
+   - Format flat object `{ title: "Tugas PPSI", due_at: null, has_specific_time: false }`: HTTP 200 OK.
+   - Format single object `{ todos: { title: "Beli buku catatan", priority_rank: "P2" } }`: HTTP 200 OK (`priority_rank: 2`, `priority_label: "Penting dan mudah rusak"`).
+2. **Unit Test Suite:** 20 test file, **166 test cases** lulus 100%.
+3. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+4. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+5. **Aktivasi Workflow n8n:** Container `botseri-n8n` di-restart dan mengimpor ulang workflow dengan konfigurasi `maxTokens: 2048`.
+6. **Antislop R-02:** 0 karakter em dash pada seluruh berkas yang disentuh.
+
+---
+
+## [2026-10-27] Critical Hotfix: n8n LangChain Sub-Node Static Parameters & Upstream Provider Rate Limit Visibility
+
+### 1. Investigasi Log Riil Kontainer & Akar Masalah
+Berdasarkan inspeksi log kontainer `botseri-dashboard` dan n8n SQLite (`execution_data` ID 142) saat pesan pengguna ("hi botseri", "malam ini jam 9 saya mau bikin ppt sismul") masuk:
+1. **Evaluasi Terisolasi Sub-Node LangChain n8n:**
+   - Sub-node LangChain (port `ai_languageModel` pada `Botseri Gateway`) sebelumnya memuat ekspresi dinamis yang memanggil node luar seperti `$('Context')`.
+   - Karena sub-node dievaluasi secara terisolasi di luar aliran item utama, pemanggilan ekspresi dinamis tersebut menyebabkan nilai parameter menjadi null atau tidak terdefinisi.
+   - **Solusi:** Nilai `maxTokens` diubah menjadi bilangan bulat statis aman `2048`, `temperature: 0.2` statis, dan `timeout: 45000` (45 detik).
+2. **Identifikasi Kegagalan Upstream OpenRouter (Rate Limit 429):**
+   - Panggilan langsung ke endpoint OpenRouter dengan kunci API aktif mengungkap akar penyebab kegagalan:
+     `Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day` (`limit_source: openrouter_free_tier_daily`, `limit: 50`, `used: 50`, `remaining: 0`).
+   - Kunci OpenRouter yang digunakan telah mencapai kuota harian batas model gratis (50 request/hari).
+   - **Solusi:**
+     - Endpoint `chat/completions/route.ts` kini mencatat log error tingkat `ERROR` dengan detail provider, model, dan status code secara eksplisit ke stdout kontainer.
+     - Node `Kirim Fallback Error` pada n8n mendeteksi pesan error 429 / Rate Limit dari upstream dan memberikan informasi jujur kepada pengguna di WhatsApp: `"Batas kuota harian model LLM terlampaui (Rate Limit). Silakan pilih model lain atau tambah kuota di menu Integrasi."` alih-alih pesan kendala generik.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Menghapus ekspresi dinamis `$('Context')` pada sub-node `lmChatOpenAi`, menetapkan `maxTokens: 2048` statis, `temperature: 0.2`, `timeout: 45000`, serta memperbarui pesan pada `Kirim Fallback Error` untuk mendeteksi error kuota/rate limit secara transparan. |
+| `dashboard/src/app/api/internal/llm/v1/chat/completions/route.ts` | Modifikasi | Menambahkan logging eksplisit ke logger JSON saat upstream provider mengembalikan status error (seperti 429 Rate Limit) beserta konteks model. |
+| `updates.md` | Modifikasi | Pencatatan kronologis investigasi log kontainer dan perbaikan parameter statis sub-node LangChain. |
+
+### 3. Hasil Verifikasi
+1. **Validasi Workflow n8n:** `./scripts/validate-workflows.sh` lulus bersih (2 workflow valid).
+2. **Aktivasi Workflow n8n:** Perintah impor workflow dan pembaruan dieksekusi sukses; kedua workflow aktif pada kontainer `botseri-n8n`.
+3. **Unit Test Suite:** 20 test file, **166 test cases** lulus 100%.
+4. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+5. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+6. **Log Kontainer Dashboard:** Log JSON terverifikasi mencatat `Upstream provider error (OPENROUTER)` dengan status `429` dan nama model secara transparan.
+7. **Antislop R-02:** 0 karakter em dash pada seluruh berkas yang dimodifikasi.
+
+---
+
+## [2026-10-27] Fix Gemini 2.5 Flash Function Calling & System Instruction Translation in LLM Gateway
+
+### 1. Investigasi Akar Masalah
+Pengujian koneksi teks biasa Gemini 2.5 Flash di dashboard berhasil (HTTP 200), namun saat pesan WhatsApp masuk ("hi" / "hi botseri"), sistem memicu pesan kendala.
+Penyebab:
+- n8n AI Agent mengirim request dengan format OpenAI Chat Completion yang memuat `role: "system"` dan array `tools`.
+- Sebelumnya provider GEMINI diarahkan ke endpoint OpenAI-compatibility Google (`/v1beta/openai`), yang tidak sepenuhnya kompatibel dengan pemanggilan fungsi (*function calling*) dan skema tools yang dikirim oleh agent LangChain n8n.
+- Gemini 2.5 Flash memiliki mekanisme *internal thinking* yang membutuhkan alokasi token output memadai (minimal 4096 token) agar tidak terpotong dengan `finishReason: "MAX_TOKENS"`.
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `dashboard/src/lib/llm-gateway/gemini.ts` | Baru | Adapter REST API resmi Gemini (`models/${model}:generateContent`):<br/>1. **`systemInstruction`**: Mengekstrak pesan `role: "system"` ke properti `systemInstruction.parts[{ text }]` terpisah, dan memastikan `contents` hanya berisi role `user` dan `model`.<br/>2. **Konversi `tools`**: Menerjemahkan array `tools` OpenAI ke format `tools[0].functionDeclarations` standar Gemini.<br/>3. **Riwayat Tool Response**: Mengonversi `role: "tool"` ke role `user` dengan objek `functionResponse`.<br/>4. **Normalisasi Respons**: Memetakan balasan `functionCall` Gemini ke OpenAI-spec `tool_calls` dengan `finish_reason: "tool_calls"`, dan balasan teks ke `choices[0].message.content`.<br/>5. **Alokasi Token Aman**: Memastikan `maxOutputTokens` minimal 4096 agar alokasi *thinking tokens* Gemini 2.5 Flash tidak memotong pesan balasan. |
+| `dashboard/src/lib/llm-gateway/index.ts` | Modifikasi | Menghubungkan router LLM Gateway ke adapter `callGemini` dan `geminiToOpenAi` saat `provider === "GEMINI"`. |
+| `dashboard/tests/unit/gemini-adapter.test.ts` | Baru | 8 skenario pengujian unit Vitest mencakup ekstraksi `systemInstruction`, konversi `tools`, riwayat function response, normalisasi output teks/functionCall, dan pemetaan URL pemanggilan jaringan. |
+| `updates.md` | Modifikasi | Pencatatan kronologis perbaikan adapter Gemini 2.5 Flash. |
+
+### 3. Hasil Verifikasi
+1. **Uji Langsung Sapaan Murni (cURL):**
+   - Request pesan dengan `role: "system"` dan `role: "user": "hi botseri"`.
+   - Gemini mengembalikan balasan teks ramah: `"Halo! Ada yang bisa saya bantu?"` dengan `finish_reason: "stop"` (HTTP 200 OK).
+2. **Uji Langsung Function Calling (cURL):**
+   - Request dengan pesan "Tolong jadwalkan jemur baju besok jam 8 pagi" dan skema `tool_create_todo_and_order`.
+   - Gemini 2.5 Flash secara akurat mengembalikan `finish_reason: "tool_calls"` dengan argumen:
+     `{"title":"jemur baju","due_at":"2026-10-28T08:00:00+07:00"}`.
+3. **Uji Langsung Sintesis Balasan Akhir (cURL):**
+   - Meneruskan hasil tool eksekusi kembali ke Gemini:
+   - Gemini menghasilkan balasan konfirmasi manusiawi: `"Baik, \"jemur baju\" sudah dijadwalkan untuk besok jam 8 pagi. Ada lagi yang bisa saya bantu?"`.
+4. **Unit Test Suite:** 21 test file, **174 test cases** lulus 100% (termasuk 8 tes baru di `gemini-adapter.test.ts`).
+5. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+6. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+7. **Antislop R-02:** 0 karakter em dash pada seluruh berkas yang disentuh.
+
+---
+
+## [2026-10-27] Fix Gemini FunctionDeclaration Schema Sanitization ($schema & additionalProperties Removal)
+
+### 1. Investigasi Akar Masalah
+Saat agent n8n (LangChain) mengirim request chat masuk, skema tools yang dihasilkan memuat kata kunci standar JSON Schema draft-07 seperti `$schema: "http://json-schema.org/draft-07/schema#"`, `title: "..."`, dan `additionalProperties: false`.
+Google Gemini REST API (`generateContent`) hanya mendukung subset OpenAPI 3.0 terbatas untuk `functionDeclarations.parameters`, dan secara ketat menolak request jika skema memuat properti yang tidak dikenali (`Invalid JSON payload received... unknown field 'additionalProperties' / '$schema'`).
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `dashboard/src/lib/llm-gateway/gemini.ts` | Modifikasi | Menambahkan fungsi rekursif `cleanGeminiSchema` untuk membersihkan field terlarang (`$schema`, `additionalProperties`, `title`, `$id`, `$comment`, `definitions`, `$defs`) dari tingkat akar, nested `properties`, dan array `items`. Memastikan `type: "object"` default terpasang jika tidak ada. |
+| `dashboard/tests/unit/gemini-adapter.test.ts` | Modifikasi | Menambahkan 3 skenario tes unit baru untuk memverifikasi pembersihan field terlarang hingga ke level nested properties dan array items. |
+| `updates.md` | Modifikasi | Pencatatan kronologis sanitasi skema tools Gemini. |
+
+### 3. Hasil Verifikasi
+1. **Uji Langsung cURL dengan Skema Terlarang:**
+   - Request dengan skema memuat `$schema: "http://json-schema.org/draft-07/schema#"`, `title: "ToolCreateTodoAndOrderInput"`, dan `additionalProperties: false`.
+   - Gemini API menerima payload tanpa error dan merespons sukses dengan HTTP 200 OK serta `tool_calls` terisi akurat.
+2. **Uji Langsung Sapaan dengan Tools:**
+   - Request sapaan "hi botseri" dengan tools terpasang merespons HTTP 200 OK dengan teks sapaan ramah.
+3. **Unit Test Suite:** 21 test file, **177 test cases** lulus 100% (termasuk 3 tes baru sanitasi skema).
+4. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+5. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+
+---
+
+## [2026-10-27] Task-Specific Due Alarm, Time Clarification Flow, & Out-of-Hours Gating Exemption
+
+### 1. Investigasi Akar Masalah & Rekap Bukti Lapangan
+Pengguna melaporkan: *"tugas pppl di 19:35, tolong ingatkan saya di 19:35"*. Tugas tersimpan di database pada pukul 12:32 UTC (19:32 WIB) dengan `due_at: 19:35 WIB`, namun pada pukul 19:35 maupun 19:37 tidak ada alarm yang terkirim.
+
+Akar penyebab sistemik yang teridentifikasi:
+1. **Absensi Mesin Evaluasi Alarm Spesifik**: Sebelumnya scheduler makro hanya mengevaluasi pemicu harian (`MORNING_BRIEF`, `WORK_HOURS_REMINDER`, `END_OF_DAY_EVAL`). Tidak ada mekanisme yang mencari to-do berjam pasti (`has_specific_time = true`) yang telah jatuh tempo.
+2. **Gating Jam Kerja Memblokir Alarm**: Seluruh loop `tick` digate oleh `isWithinWindow(work_hours_start, work_hours_end)` dan `isWorkingDay`. Tugas yang jatuh tempo di luar jam kerja atau akhir pekan tidak pernah dievaluasi.
+3. **Granularitas Cron 15 Menit**: Jadwal cron n8n sebelumnya adalah 15 menit, sehingga alarm dengan jam presisi tidak dapat terkirim tepat waktu.
+4. **Premature Rollover EOD**: Evaluasi EOD pada jam akhir kerja (misal 17:00) menggulirkan semua to-do `planned_date <= today` ke besok, sehingga tugas malam (misal 19:35) sebelum waktunya tiba sudah diubah tanggal rencananya menjadi besok.
+5. **Halusinasi Waktu LLM**: Ketika pengguna menyebutkan waktu relatif ("besok pagi", "setengah 8"), LLM kerap salah menghitung jam atau salah offset zona waktu.
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `dashboard/prisma/schema.prisma` | Modifikasi | Menambahkan field alarm pada model `Todo`: `reminded_at` (timestamptz), `reminder_claimed_at` (timestamptz), `reminder_attempts` (Int @default(0)), serta index gabungan `@@index([status, has_specific_time, due_at])`. |
+| `dashboard/prisma/migrations/20261027160000_add_task_alarm_columns_to_todos/migration.sql` | Baru | Migrasi SQL DDL untuk penambahan kolom alarm dan pembuatan partial index di PostgreSQL. |
+| `dashboard/src/lib/time/index.ts` | Modifikasi | Menambahkan resolver waktu deterministik `resolveTimeExpression` dengan slot konstanta `DAYPART_SLOTS` (PAGI 08:30 hari ini / 08:00 besok, SIANG 12:30, SORE 16:00, MALAM 19:30), margin 1 menit `MIN_FUTURE_MARGIN_MINUTES`, penanganan `half_before`, waktu ambigu AM/PM, serta `formatDueAtLocalText`. |
+| `dashboard/src/lib/scheduler/queries.ts` | Modifikasi | Menambahkan fungsi klaim atomik `claimDueTaskAlarms` (`FOR UPDATE SKIP LOCKED`), logika murni `isAlarmDue`, fungsi format teks alarm deterministik `formatTaskAlarm` (membedakan tepat waktu vs terlambat), sanitasi teks WhatsApp `sanitizeTitleForWhatsapp`, dan isolasi anti-spam (cooldown 2 menit, max attempts 5, max lateness 12 jam). |
+| `dashboard/src/lib/scheduler/tick.ts` | Modifikasi | Mengevaluasi alarm spesifik `claimDueTaskAlarms` di luar gating jam kerja dan hari libur. Memperbaiki rollover EOD agar tidak menggulirkan tugas yang memiliki `due_at > now`. Menambahkan pembersihan otomatis `pruneOldTickEvents`. |
+| `dashboard/src/app/api/internal/scheduler/jobs/[jobId]/result/route.ts` | Modifikasi | Menangani hasil eksekusi job `TASK_ALARM` (`alarm:<todo_id>:<attempt>`): mencatat `reminded_at` dan menghapus `reminder_claimed_at` saat `SENT`, mencatat `message_log` OUTBOUND, serta menangani status `FAILED` dengan pelepasan klaim. |
+| `dashboard/src/app/api/internal/tools/create-todo-and-order/route.ts` | Modifikasi | Mendukung `time_expression` dan `date_hint` pada pembuatan to-do baru, mengembalikan `due_at_local_text` dan bendera `needs_time`. |
+| `dashboard/src/app/api/internal/tools/update-todo/route.ts` | Modifikasi | Mendukung `time_expression` dan `date_hint`, mereset state alarm jika `due_at` dimajukan ke masa depan, dan mengembalikan `due_at_local_text`. |
+| `dashboard/src/app/api/internal/context/chat/route.ts` | Modifikasi | Menginjeksi `untimed_recent_todos` (tugas tanpa jam spesifik yang dibuat dalam 30 menit terakhir) ke dalam konteks `renderPrompt`. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Menambahkan instruksi mode CHAT_MASUK untuk alur klarifikasi waktu ramah (satu gelembung, opsi mengabaikan), serta mendaftarkan placeholder `{{untimed_recent_todos}}`. |
+| `dashboard/src/lib/llm-gateway/gemini.ts` | Modifikasi | Mendukung normalisasi tipe array JSON Schema (misal `["string", "null"]`) agar kompatibel dengan Gemini FunctionDeclaration. |
+| `n8n-engine/workflows/botseri-scheduler.json` | Modifikasi | Mengubah frekuensi scheduleTrigger menjadi 1 menit, menambahkan node "Perlu LLM?" untuk bypass LLM pada job `TASK_ALARM` (`skip_llm: true`), dan mengonfigurasi `saveDataSuccessExecution: "none"`. |
+| `dashboard/tests/unit/task-alarm.test.ts` | Baru | 20 skenario uji unit Vitest untuk `resolveTimeExpression`, `isAlarmDue`, dan `formatTaskAlarm`. |
+| `updates.md` | Modifikasi | Pencatatan kronologis implementasi task alarm dan klarifikasi waktu. |
+
+### 3. Hasil Verifikasi & Pengujian Lapangan
+1. **Uji Klaim Alarm Tepat Waktu (Tick & DB):**
+   - Tugas `[TEST-ALARM]` dengan `due_at` di masa depan: `jobs: []`, `reminder_attempts: 0`, `reminded_at: null`.
+   - Saat jatuh tempo: `tick` langsung menghasilkan job `TASK_ALARM` dengan `skip_llm: true`, `job_id: "alarm:...:1"`, dan `fallback_text` terformat rapi.
+   - Pelaporan `SENT` memperbarui `reminded_at` di DB dan mencatat `message_log` OUTBOUND.
+   - Idempotensi terbukti: pemanggilan `tick` berikutnya tidak memicu duplikasi (`jobs: []`).
+2. **Uji Pengecualian Jam Kerja (Out of Hours):**
+   - Jam kerja diubah ke `09:00 - 17:00`, waktu pengujian `20:23 WIB` (di luar jam kerja).
+   - Tugas `[TEST-ALARM-OOH]` tetap diklaim dan dikirim, sedangkan job makro (`MORNING_BRIEF`, `WORK_HOURS_REMINDER`) tetap diblokir.
+3. **Uji Klarifikasi Waktu via WhatsApp Chat Inbound:**
+   - Pesan "Saya harus bayar tagihan listrik" memanggil `tool_create_todo_and_order` dengan `has_specific_time: false` dan `needs_time: true`.
+   - LLM membalas ramah dalam satu gelembung: *"Siap, tugas *Bayar tagihan listrik* sudah dicatat dengan prioritas Cashflow. Mau diingatkan jam berapa? (Boleh diabaikan jika tidak butuh alarm khusus, nanti tugas tetap masuk jadwal rutin harian)."*
+   - Pengguna menjawab: *"besok jam 08:00 wib"*. LLM memanggil `tool_update_todo` untuk tugas terkait dan mengonfirmasi dengan mengutip `due_at_local_text` (*"Rabu, 28 Okt 2026, 08:00 WIB"*).
+4. **Unit Test Suite:** 22 test file, **197 test cases** lulus 100% (termasuk 20 tes baru di `task-alarm.test.ts`).
+5. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+6. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+7. **Workflow n8n:** `./scripts/validate-workflows.sh` lulus (2 file valid).
+8. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-10-29] Strict Separation of Deadline (due_at) vs Reminder Alarm (remind_at) & Deterministic Dispatch
+
+### 1. Investigasi Akar Masalah & Temuan Lapangan
+1. **Kegagalan Intent LLM**: Ketika pengguna meminta *"oke ingatkan saya di 09:25 untuk mengerjakan tugas RPL2"*, LLM malah memanggil kueri pencarian to-do lama (`tool_get_prioritized_todos`) dan merespons *"Tugas RPL2 yang mana? Saya tidak bisa menemukan tugas tersebut"*.
+2. **Ambiguitas Deadline vs Pengingat**: Sistem sebelumnya menyamakan jam alarm pengingat dengan batas akhir to-do (`due_at`). Akibatnya, waktu pengingat yang diminta pengguna keliru diartikan sebagai deadline penyelesaian.
+3. **Absensi Kolom `remind_at`**: Tabel `todos` hanya memiliki `due_at` tanpa kolom waktu alarm terpisah, menyulitkan pembedaan antara tugas yang harus selesai pada jam tertentu vs tugas yang ingin diingatkan pada jam tertentu.
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `dashboard/prisma/schema.prisma` | Modifikasi | Menambahkan kolom `remind_at` (`DateTime? @db.Timestamptz`) pada model `Todo` serta index gabungan `@@index([status, reminded_at, remind_at])`. |
+| `dashboard/prisma/migrations/20261029000000_separate_due_at_and_remind_at/migration.sql` | Baru | Migrasi SQL DDL untuk penambahan kolom `remind_at` dan pembuatan index di PostgreSQL. |
+| `dashboard/src/lib/todos/create.ts` | Modifikasi | Menambahkan fungsi `resolveDueAndReminder` yang mengimplementasikan 4 aturan bisnis deterministik:<br/>• Kasus A (ada `due_at`, tanpa `remind_at`): otomatis menghitung `remind_at` 1 jam sebelum deadline.<br/>• Kasus B (ada `remind_at`, tanpa `due_at`): menyimpan `remind_at`, membiarkan `due_at: null`, dan `has_specific_time: true`.<br/>• Kasus C (ada `due_at` dan `remind_at`): menyimpan keduanya secara independen.<br/>• Kasus D (tanpa jam): `due_at: null`, `remind_at: null`, `has_specific_time: false`. |
+| `dashboard/src/app/api/internal/tools/create-todo-and-order/route.ts` | Modifikasi | Menerima dan menormalisasi parameter `remind_at` secara terpisah dari `due_at`, serta mengembalikan `remind_at` dan `remind_at_local_text`. |
+| `dashboard/src/app/api/internal/tools/update-todo/route.ts` | Modifikasi | Mendukung pembaruan parameter `remind_at`, mereset status alarm jika waktu dimajukan, dan mengembalikan `remind_at` serta `remind_at_local_text`. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Memperjelas instruksi sistem: permintaan pengingat ("ingatkan saya...", "jadwalkan...", "ada tugas...") wajib langsung membuat to-do baru lewat `tool_create_todo_and_order` tanpa bertanya to-do lama; membedakan parameter `due_at` (kata kunci: deadline, tenggat, selesai jam X) vs `remind_at` (kata kunci: ingatkan jam X). |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Menambahkan parameter `remind_at` pada deklarasi tool n8n `tool_create_todo_and_order` dan `tool_update_todo`. |
+| `dashboard/src/lib/scheduler/queries.ts` | Modifikasi | Menambahkan fungsi `getPendingAlarms(now: Date)`, memperbarui `claimDueTaskAlarms` untuk mengevaluasi `remind_at` (dengan fallback `due_at`), memperbarui `isAlarmDue`, dan memperbarui `formatTaskAlarm` dengan format deterministik tanpa LLM:<br/>• Dengan `due_at`: `🔔 Pengingat: Tugas *${title}* mendekati batas waktu (Tenggat: ${time} · 1 jam lagi). Semangat tuntaskan ya!`<br/>• Hanya `remind_at`: `🔔 Pengingat: Waktunya mengerjakan *${title}* sekarang (${time}). Semangat!` |
+| `dashboard/src/lib/scheduler/tick.ts` | Modifikasi | Meneruskan `remind_at` ke `formatTaskAlarm` saat membuat job `TASK_ALARM`. |
+| `dashboard/tests/unit/reminder-logic.test.ts` | Baru | 6 skenario uji unit Vitest untuk pemisahan `due_at` vs `remind_at` (Kasus A, B, C, D) dan perakitan teks alarm. |
+| `dashboard/tests/unit/task-alarm.test.ts` | Modifikasi | Menyesuaikan ekspektasi pengujian `formatTaskAlarm` dengan template deterministik baru. |
+| `updates.md` | Modifikasi | Pencatatan kronologis pemisahan deadline vs pengingat alarm. |
+
+### 3. Hasil Verifikasi & Pengujian Lapangan
+1. **Uji Kasus A/B/C/D & Format Teks (Vitest):**
+   - Deadline jam 14:00 menghasilkan `remind_at` jam 13:00 (1 jam sebelumnya).
+   - Permintaan pengingat jam 09:25 menghasilkan `remind_at: 09:25` dan `due_at: null`.
+   - Seluruh 6 skenario di `reminder-logic.test.ts` lulus 100%.
+2. **Uji Simulasi Scheduler Tick & Idempotensi (Live DB):**
+   - To-do uji dengan `remind_at` 1 menit yang lalu menghasilkan job `TASK_ALARM`:
+     `🔔 Pengingat: Waktunya mengerjakan *[TEST-REMIND] Mengerjakan tugas RPL2* sekarang (09:51). Semangat!`
+   - Pelaporan `SENT` memperbarui `reminded_at` di PostgreSQL.
+   - Pemanggilan `tick()` kedua kali mengembalikan `jobs: []` (idempoten, tidak ada duplikasi).
+3. **Uji Format Alarm Mendekati Deadline (Live DB):**
+   - To-do dengan deadline 1 jam ke depan menghasilkan teks:
+     `🔔 Pengingat: Tugas *[TEST-DUE] Submit Laporan Akhir* mendekati batas waktu (Tenggat: 10:53 · 1 jam lagi). Semangat tuntaskan ya!`
+4. **Uji Percakapan WhatsApp Inbound:**
+   - Chat: *"oke ingatkan saya di 09:40 untuk mengerjakan tugas RPL2"*.
+   - LLM langsung memanggil `tool_create_todo_and_order` dengan `title: "Mengerjakan tugas RPL2"` dan `remind_at: "2026-10-29T09:40:00+07:00"` (tanpa bertanya to-do lama).
+   - Backend merespons dengan `remind_at: "2026-10-29T09:40:00+07:00"` dan `due_at: null`.
+   - Konfirmasi bot dalam satu gelembung ramah: *"Baik, sudah dicatat ✅\n*Mengerjakan tugas RPL2* akan diingatkan pada Kamis, 29 Okt 2026, 09:40 WIB (prioritas Kritis). Jangan sampai terlewat lagi."*
+   - Pada siklus scheduler, job `TASK_ALARM` otomatis dibuat dan dikirim ke nomor WhatsApp pemilik.
+5. **Unit Test Suite:** 23 test file, **203 test cases** lulus 100%.
+6. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+7. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+8. **Workflow n8n:** `./scripts/validate-workflows.sh` lulus (2 file valid).
+9. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-10-29] Critical Hotfix: Bypass LLM Node for TASK_ALARM in Scheduler & Fix JOB_SEND_FAILED
+
+### 1. Investigasi Akar Masalah & Temuan Lapangan
+1. **JOB_SEND_FAILED di System Events**: Scheduler mencatat error `JOB_SEND_FAILED` dengan rincian `400 Bad Request` dari `/api/internal/waha/send`:
+   `{"fieldErrors":{"trigger_type":["Invalid option: expected one of \"CHAT_MASUK\"|\"MORNING_BRIEF\"|\"WORK_HOURS_REMINDER\"|\"END_OF_DAY_EVAL\"|\"PAIRING\""]}}`.
+   Penyebab: `http-send` di n8n mengirimkan `trigger_type: job.job_type` (`TASK_ALARM`), yang belum terdaftar di enum skema `triggers` pada endpoint `waha/send`.
+2. **Tracing Plugin n8n (N8nLlmTracing)**: Log container n8n menunjukkan `Error in handler N8nLlmTracing, handleLLMStart: TypeError: fetch failed` saat job alarm dievaluasi oleh node LangChain/LLM.
+3. **Normalisasi Chat ID**: Pengiriman ke WAHA NOWEB memerlukan target berakhiran `@c.us` dengan format digit murni (bukan format JID `@lid` atau format dengan simbol `+`).
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `n8n-engine/workflows/botseri-scheduler.json` | Modifikasi | Merombak total percabangan workflow scheduler: job bertipe `TASK_ALARM` (atau `skip_llm: true`) langsung dialihkan ke node `Kirim WhatsApp Alarm` (`POST /api/internal/waha/send`) tanpa menyentuh node LLM atau LangChain. Mengirimkan parameter `trigger_type: 'WORK_HOURS_REMINDER'`, `chat_id: $json.target_chat_id \|\| $json.chat_id`, dan `body: $json.body \|\| $json.fallback_text`. |
+| `dashboard/src/app/api/internal/waha/send/route.ts` | Modifikasi | Menambahkan `"TASK_ALARM"` ke dalam daftar opsi `triggers` Zod schema agar request dengan trigger_type tersebut tetap sah (HTTP 200). Memperbaiki `normalizeChatId` agar membuang simbol non-digit pada nomor telepon dan otomatis mengonversi `@lid` ke format `@c.us` berdasarkan data `authorized_numbers`. |
+| `dashboard/src/lib/waha/humanizer.ts` | Modifikasi | Memperkuat validasi penerima `validateRecipient` agar mencocokkan nomor telepon secara defensif (baik dengan awalan `+`, tanpa awalan, maupun format `@c.us`). |
+| `dashboard/src/lib/scheduler/tick.ts` | Modifikasi | Memperbarui pembuatan job `TASK_ALARM` pada `tick` agar selalu menyediakan properti `chat_id`, `target_chat_id` (format `digits@c.us`), `body`, dan `fallback_text` yang siap dikirim langsung oleh n8n. |
+| `updates.md` | Modifikasi | Pencatatan kronologis perbaikan bypass LLM untuk task alarm dan perbaikan `JOB_SEND_FAILED`. |
+
+### 3. Hasil Verifikasi & Pengujian Lapangan
+1. **Uji Langsung Endpoint WAHA Send (cURL):**
+   - Request dengan `trigger_type: "TASK_ALARM"` dan `chat_id: "6287881820571@c.us"` berhasil dikirim dengan HTTP 200 OK (`message_id: c0150192-...`, status: PENDING).
+2. **Uji End-to-End Scheduler Cron & WAHA:**
+   - Memasukkan to-do uji `[HOTFIX-TEST] Mengerjakan laporan darurat` dengan `remind_at = now() - interval '10 seconds'`.
+   - Cron 1 menit n8n memproses alarm melalui jalur direct bypass (`Apakah Alarm? -> Kirim WhatsApp Alarm -> Status Hasil Alarm -> Lapor Hasil`).
+   - `todos.reminded_at` terisi `2026-10-29 03:29:50.337+00`, `reminder_attempts: 1`, `reminder_claimed_at: null`.
+   - Pesan OUTBOUND tercatat di `message_log` secara otomatis.
+   - Event `TICK_OK` tercatat bersih di `system_events` tanpa ada error `JOB_SEND_FAILED` maupun `N8nLlmTracing`.
+3. **Unit Test Suite:** 23 test file, **203 test cases** lulus 100%.
+4. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+5. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+6. **Workflow n8n:** `./scripts/validate-workflows.sh` lulus (2 file valid).
+7. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-10-29] Bugfix: Eliminate Hardcoded "1 Jam Lagi" & Enforce Strict remind_at vs due_at Semantics
+
+### 1. Investigasi Akar Masalah & Temuan Lapangan
+Pengguna melaporkan: *"ingatkan saya di jam 10:35 ada meeting pppl"*, namun bot mengirim pesan:
+`"🔔 Pengingat: Tugas Meeting PPPL mendekati batas waktu (Tenggat: 10:35 · 1 jam lagi). Semangat tuntaskan ya!"`.
+
+Dua akar masalah:
+1. **Penyimpangan Pemetaan Input LLM**: Permintaan agenda/pengingat jam tertentu dipetakan LLM ke `due_at` (tenggat) bukan `remind_at`.
+2. **Hardcoded String di Generator Alarm**: Generator pesan mencantumkan string statis `"· 1 jam lagi"` setiap kali `due_at` ada tanpa menghitung selisih waktu riil secara dinamis terhadap waktu eksekusi (`now`).
+
+### 2. Perbaikan yang Diterapkan
+
+| Path Berkas | Status | Deskripsi Perbaikan |
+|---|---|---|
+| `dashboard/src/lib/scheduler/queries.ts` | Modifikasi | Menghapus string statis `"· 1 jam lagi"`. Rangkai pesan pengingat berdasarkan konteks waktu riil:<br/>• Jika `due_at` dan `remind_at` ada serta `due_at > remind_at`: hitung selisih menit matematis `(due_at - now) / 60000`, lalu tampilkan `Tenggat: ${time} · ${diffMinutes} menit lagi`.<br/>• Jika hanya `due_at`: tampilkan `🔔 Pengingat: Batas waktu tugas *${title}* tiba sekarang (${time}).`.<br/>• Jika hanya `remind_at` (agenda/pengingat): tampilkan `🔔 Pengingat: Waktunya *${title}* sekarang (${time}). Semangat!`. Menambahkan suffix zona waktu otomatis (WIB/WITA/WIT). |
+| `dashboard/src/app/api/internal/tools/create-todo-and-order/route.ts` | Modifikasi | Memastikan payload dengan `remind_at` tanpa `due_at` disimpan dengan `due_at: null` dan `has_specific_time: true`. Menambahkan properti `time_label` pada respons konfirmasi: menggunakan frasa `"Pengingat: [Waktu]"` jika hanya ada `remind_at`, dan `"Tenggat: [Waktu]"` jika ada `due_at`. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Mengetatkan instruksi sistem: permintaan pengingat/agenda ('ingatkan saya jam 10:35 ada meeting', 'ingatkan jam 2 siang...') WAJIB dikirim sebagai `remind_at` dan `due_at: null`. HANYA isi `due_at` jika pengguna eksplisit menyebut kata 'deadline', 'tenggat', atau 'paling lambat jam X'. Konfirmasi balik wajib menggunakan 'Pengingat: [Waktu]' (dilarang menggunakan kata 'Tenggat' jika bukan deadline). |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Memperjelas deskripsi parameter `due_at` dan `remind_at` pada deklarasi tool n8n agar LLM tidak keliru memetakan jam pengingat ke due_at. |
+| `dashboard/tests/unit/scheduler-message.test.ts` | Baru | 5 skenario uji unit Vitest untuk memastikan perakitan pesan alarm deterministik: to-do hanya remind_at menghasilkan format `(10:35 WIB)` tanpa kata Tenggat dan tanpa 1 jam lagi; to-do due_at menghasilkan selisih menit terhitung dinamis ("60 menit lagi", "15 menit lagi"); sanitasi format WhatsApp; dan nol karakter em dash. |
+| `dashboard/tests/unit/reminder-logic.test.ts` | Modifikasi | Menyesuaikan ekspektasi teks pengujian dengan format dinamis baru dan suffix WIB. |
+| `dashboard/tests/unit/task-alarm.test.ts` | Modifikasi | Menyesuaikan ekspektasi teks pengujian dengan format dinamis baru dan suffix WIB. |
+| `updates.md` | Modifikasi | Pencatatan kronologis penghapusan hardcoded 1 jam lagi dan pengetatan semantik remind_at vs due_at. |
+
+### 3. Hasil Verifikasi & Pengujian Lapangan
+1. **Unit Test String Builder (Vitest):**
+   - To-do dengan `remind_at = 10:35 WIB` menghasilkan:
+     `🔔 Pengingat: Waktunya *Meeting PPPL* sekarang (10:35 WIB). Semangat!` (tanpa kata Tenggat, tanpa 1 jam lagi).
+   - To-do dengan `due_at = 11:35 WIB` dan `remind_at = 10:35 WIB` menghasilkan:
+     `🔔 Pengingat: Tugas *Tugas PPPL* mendekati batas waktu (Tenggat: 11:35 WIB · 60 menit lagi). Semangat tuntaskan ya!`.
+   - Seluruh 5 pengujian di `scheduler-message.test.ts` lulus 100%.
+2. **Uji Langsung Percakapan & Ekstraksi Tool (Live LLM):**
+   - Chat: *"ingatkan saya di jam 13:40 ada evaluasi tim"*.
+   - LLM secara akurat mengekstrak: `title: "Evaluasi tim"`, `remind_at: "2026-10-29T13:40:00+07:00"`, `due_at: null`.
+   - Respons konfirmasi bot: *"Siap, sudah dicatat ✅\n• Evaluasi tim · Pengingat: Kamis, 29 Okt 2026, 13:40 WIB (prioritas Kritis)"* (tanpa kata "Tenggat").
+3. **Uji Pengiriman Alarm Riil Saat Waktu Tiba (Live DB & Cron):**
+   - Saat jam pengingat tiba, scheduler cron n8n mengeksekusi alarm tanpa LLM dan mencatat pesan OUTBOUND di `message_log`:
+     `🔔 Pengingat: Waktunya *Evaluasi tim* sekarang (13:25 WIB). Semangat!`
+4. **Unit Test Suite:** 24 test file, **208 test cases** lulus 100%.
+5. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+6. **Smoke Test:** `./scripts/smoke.sh` lulus 8/8 PASS.
+7. **Workflow n8n:** `./scripts/validate-workflows.sh` lulus (2 file valid).
+8. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-02] Allow Customer Outbound Messages in /api/internal/waha/send & Add CUSTOMER_REPLY Trigger
+
+### 1. Ringkasan Perbaikan
+Mengatasi kendala pemblokiran balasan pesan bot ke nomor pelanggan baru (`UNAUTHORIZED_RECIPIENT` / HTTP 403):
+- **Akar Masalah:**
+  - Endpoint `/api/internal/waha/send` dan modul `dashboard/src/lib/waha/humanizer.ts` sebelumnya memvalidasi nomor penerima secara ketat hanya pada tabel `authorized_numbers`.
+  - Akibatnya, pengiriman balasan ke nomor pelanggan yang terdaftar di `customer_sessions` ditolak dengan kode `UNAUTHORIZED_RECIPIENT`.
+- **Solusi yang Diterapkan:**
+  - Pada `dashboard/src/app/api/internal/waha/send/route.ts`:
+    - Menambahkan pengecekan `customerSession.findUnique` jika nomor tujuan tidak terdaftar di `authorized_numbers`.
+    - Pengiriman diizinkan bila nomor terdaftar di salah satu dari `authorized_numbers` atau `customer_sessions`.
+    - Jika nomor tidak ada di kedua tabel, mengembalikan respons HTTP 403: `"Nomor tujuan tidak terdaftar di authorized_numbers maupun customer_sessions"`.
+    - Menambahkan nilai `'CUSTOMER_REPLY'` ke daftar enum Zod `triggers`.
+  - Pada `dashboard/src/lib/waha/humanizer.ts`:
+    - Memperbarui fungsi `validateRecipient` agar turut mengecek tabel `customer_sessions` sebelum melemparkan `HumanizerError('UNAUTHORIZED_RECIPIENT', 403)`.
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/api/internal/waha/send/route.ts` | Modifikasi | Menambahkan verifikasi `customer_sessions`, pesan error komprehensif, dan trigger `CUSTOMER_REPLY`. |
+| `dashboard/src/lib/waha/humanizer.ts` | Modifikasi | Memperbarui `validateRecipient` agar mengizinkan nomor yang terdaftar di `customer_sessions`. |
+| `dashboard/tests/unit/waha-send-route.test.ts` | Modifikasi | Menambahkan unit test untuk pengiriman ke nomor customer session dan verifikasi penolakan nomor tak terdaftar. |
+| `updates.md` | Modifikasi | Pencatatan kronologis perbaikan customer outbound routing. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 26 test file, **256 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** Bebas em dash.
+
+---
+
+## [2026-11-02] Tool Get Orders for Owner & Instant WhatsApp Alert for New Incoming Orders
+
+### 1. Ringkasan Fitur & Perbaikan
+1. **Tool Get Orders (`tool_get_orders`):**
+   - Menambahkan endpoint internal `dashboard/src/app/api/internal/tools/get-orders/route.ts` yang mendukung `GET` dan `POST`.
+   - Mengambil daftar pesanan aktif dari tabel `orders` terurut `event_date ASC`, diformat ke zona waktu lokal `Asia/Jakarta`, lengkap dengan ekstraksi `delivery_time` dan `special_notes`.
+   - Mendaftarkan sub-node tool `@n8n/n8n-nodes-langchain.toolHttpRequest` bernama `tool_get_orders` di workflow n8n `botseri-inbound-agent.json` dan menghubungkannya ke `ai_tool` pada AI Agent.
+2. **Pertahanan Ganda pada `tool_get_prioritized_todos`:**
+   - Menyertakan ringkasan `upcoming_orders` di samping to-do aktif agar saat agen LLM memeriksa agenda hari ini, data pesanan pelanggan tetap tampak dan terbaca.
+3. **Notifikasi Alert Pesanan Baru ke Owner:**
+   - Memperbaiki `dashboard/src/app/api/internal/customer/handle/route.ts` saat pesanan berhasil disimpan (`PROCESS_ORDER`) untuk menghasilkan dua pesan:
+     1. Konfirmasi pesanan ke pelanggan (`trigger_type: "CUSTOMER_REPLY"`).
+     2. Pesan alert instan ke Owner Utama (`trigger_type: "NEW_ORDER_ALERT"`) memuat nama pemesan, rincian pesanan, tanggal/jam acara, lokasi, dan status pembayaran.
+   - Fungsi helper `getPrimaryOwner()` dilengkapi mekanisme auto-healing: jika belum ada nomor dengan `is_primary: true`, sistem secara otomatis mempromosikan nomor owner terbaru menjadi primary.
+4. **Penanganan Anti-429 & Batching WAHA:**
+   - Menambahkan trigger `'NEW_ORDER_ALERT'` pada enum Zod `dashboard/src/app/api/internal/waha/send/route.ts` dan membebaskannya dari blokir penerima.
+   - Mengaktifkan opsi batching pada node `Kirim WhatsApp` di n8n dengan `batchInterval: 2500` ms (jeda 2.5 detik) agar pesan konfirmasi pelanggan dan alert owner tidak saling tumpang-tindih.
+5. **Penyelarasan Prompt Sistem (`base.id.md`):**
+   - Menambahkan aturan nomor 7 pada instruksi `CHAT_MASUK`: saat pemilik menanyakan pesanan pelanggan, WAJIB memanggil `tool_get_orders` dan dilarang hanya memanggil `tool_get_prioritized_todos`. Format balasan dalam satu balon chat (Single-Bubble).
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/api/internal/tools/get-orders/route.ts` | Baru | Endpoint internal `tool_get_orders` (GET & POST) dengan format tanggal Indonesia dan ekstraksi detail catatan. |
+| `dashboard/src/app/api/internal/tools/get-prioritized-todos/route.ts` | Modifikasi | Menyertakan kueri dan properti `upcoming_orders` pada response payload to-do. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Helper auto-healing `getPrimaryOwner` dan pembuatan 2 pesan (klien + alert owner) saat pesanan baru tercatat. |
+| `dashboard/src/app/api/internal/waha/send/route.ts` | Modifikasi | Menambahkan enum trigger `NEW_ORDER_ALERT` dan bypass verifikasi untuk alert owner. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Instruksi sistem kewajiban pemanggilan `tool_get_orders` dan penyajian Single-Bubble. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Sub-node `tool_get_orders` terhubung ke AI Agent, pembacaan payload fleksibel, dan batching 2500ms di `Kirim WhatsApp`. |
+| `dashboard/tests/unit/get-orders-route.test.ts` | Baru | 3 skenario tes unit untuk endpoint `get-orders` (auth, empty state, format data). |
+| `dashboard/tests/unit/customer-handle.test.ts` | Modifikasi | Pengujian 2 balasan pada pembuatan order dan auto-healing primary owner. |
+| `dashboard/tests/unit/waha-send-route.test.ts` | Modifikasi | Pengujian pengiriman dengan trigger `NEW_ORDER_ALERT`. |
+| `updates.md` | Modifikasi | Dokumentasi kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 27 test file, **261 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Validasi n8n Workflow:** JSON parsing valid, seluruh relasi node konsisten.
+4. **Antislop R-02:** Bebas em dash pada seluruh berkas.
+
+---
+
+## [2026-11-02] Segmented Orders Response (Today vs Upcoming) & Guaranteed Owner Order Alert
+
+### 1. Ringkasan Perbaikan & Fitur
+Mengatasi kendala penyaringan tanggal literal oleh LLM dan kegagalan alert pesanan baru ke WhatsApp owner:
+1. **Segmentasi Respons `get-orders` (`orders_today` vs `upcoming_orders`):**
+   - Pada `dashboard/src/app/api/internal/tools/get-orders/route.ts`:
+     - Menggunakan `localDayUtcBounds` untuk membagi pesanan aktif secara presisi ke dalam dua kelompok:
+       - `orders_today`: Pesanan dengan `event_date` hari ini (00:00:00 sampai 23:59:59 WIB).
+       - `upcoming_orders`: Pesanan dengan `event_date` setelah hari ini (maksimal 10 pesanan terdekat).
+     - Menghasilkan field `today_count`, `upcoming_count`, `total_active`, `orders_today[]`, dan `upcoming_orders[]`.
+     - Format `payment_status` manusiawi: `"Belum dibayar"` untuk `UNPAID`, `"DP dibayar"` untuk `DP_PAID`, dan `"Lunas"` untuk `PAID`.
+     - Menyediakan properti `event_date_formatted` dan `event_date` untuk kejelasan tampilan LLM.
+2. **Penyelarasan Prompt Sistem (`base.id.md`):**
+   - Menambahkan petunjuk tegas: jika `orders_today` kosong, asisten wajib menyatakan jadwal hari ini kosong lalu WAJIB menyebutkan pesanan aktif dari `upcoming_orders` (nama pemesan, jenis layanan, tanggal acara, status bayar).
+   - Melarang keras membalas "Belum ada pesanan masuk" jika terdapat pesanan di `upcoming_orders`.
+3. **Jaminan Pengiriman Alert Pesanan Baru (`customer/handle/route.ts`):**
+   - Menghapus syarat kaku pada helper `getPrimaryOwner`: jika tidak ada nomor dengan `is_primary: true`, sistem mengambil nomor pertama di `authorized_numbers` berdasarkan `created_at ASC` dan otomatis menjadikannya primary (`is_primary: true`).
+   - Menghasilkan 2 pesan terstruktur: konfirmasi pelanggan (`CUSTOMER_REPLY`) dan alert owner (`NEW_ORDER_ALERT`).
+4. **Verifikasi Pemetaan Workflow n8n (`botseri-inbound-agent.json`):**
+   - Memastikan node `Format WAHA ChatId` dan `Kirim WhatsApp` memetakan `$json.chat_id` dan `$json.phone_e164` secara independen untuk tiap item hasil split out, tanpa fallback keliru ke chat pengirim pesan masuk.
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/api/internal/tools/get-orders/route.ts` | Modifikasi | Menambahkan segmentasi `orders_today` dan `upcoming_orders`, perbaikan format status bayar dan tanggal. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Panduan sintesis Single-Bubble untuk pesanan hari ini dan pesanan mendatang. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Helper `getPrimaryOwner` tanpa syarat kaku dan format alert pesanan baru. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Pemetaan independen chat_id, phone_e164, to, body, dan trigger_type pada Format WAHA ChatId. |
+| `dashboard/tests/unit/get-orders-route.test.ts` | Modifikasi | Pengujian struktur segmentasi `today_count`, `upcoming_count`, `orders_today`, dan `upcoming_orders`. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 27 test file, **261 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Validasi n8n Workflow:** JSON parsing valid, seluruh graph node terhubung akurat.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-02] Tool Update Order (Complete/Delete) & Fix Silent Customer Order Submission Failure
+
+### 1. Ringkasan Perbaikan & Fitur
+Mengatasi kendala ketiadaan tool untuk menandai pesanan selesai/hapus dan memastikan pelanggan selalu menerima balasan konfirmasi:
+1. **Tool Pembaruan/Penghapusan Pesanan (`tool_update_order`):**
+   - Membuat endpoint internal `dashboard/src/app/api/internal/tools/update-order/route.ts` (POST):
+     - Menerima `order_id` (format `#ORD-504D0BA0`, `504D0BA0`, atau nama pemesan), `action` (`COMPLETE`, `DELETE`, `CANCEL`), dan `notes`.
+     - Membersihkan prefix `#ORD-` dan mencari pesanan secara akurat menggunakan PostgreSQL query prefix matching (`id::text ILIKE`).
+     - Aksi `COMPLETE`: Memperbarui status pembayaran menjadi `PAID` dan menambahkan `[STATUS: SELESAI]` ke `notes`.
+     - Aksi `DELETE` / `CANCEL`: Menghapus baris pesanan dari database.
+   - Menambahkan sub-node `@n8n/n8n-nodes-langchain.toolHttpRequest` bernama `tool_update_order` di `n8n-engine/workflows/botseri-inbound-agent.json` terhubung ke port `ai_tool` pada AI Agent.
+2. **Pemisahan Tegas To-Do vs Pesanan di Prompt Sistem (`base.id.md`):**
+   - Menambahkan aturan nomor 5: saat pengguna menyebut 'pesanan', 'order', atau ID '#ORD-', agen WAJIB memanggil `tool_get_orders` (untuk melihat) atau `tool_update_order` (untuk selesai/hapus). Melarang keras memanggil `tool_update_todo_status` untuk pesanan pelanggan.
+3. **Pembersihan Teks Pesanan Pelanggan (`orderFormat.ts`):**
+   - Menghapus teks pengantar sebelum `*FORMAT PESANAN BERSERI*` dan teks petunjuk footer (seperti "_Salin dan isi format di atas..._") agar tidak mengacaukan field `request_khusus` atau membingungkan parser.
+4. **Jaminan Balasan Pelanggan (Defensive Owner Alert):**
+   - Membungkus persiapan alert WhatsApp owner dalam blok `try / catch` mandiri di `customer/handle/route.ts` agar jika pencarian owner gagal, pesan konfirmasi pesanan pelanggan tetap terkirim tanpa melempar HTTP 500.
+5. **Penyelarasan Node n8n (`Format WAHA ChatId`):**
+   - Memperbarui kode JavaScript pada node `Format WAHA ChatId` menggunakan `$input.all()` untuk memetakan seluruh item hasil split out secara aman.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/api/internal/tools/update-order/route.ts` | Baru | Endpoint internal `tool_update_order` untuk menandai selesai/lunas atau menghapus pesanan. |
+| `dashboard/src/lib/customer/orderFormat.ts` | Modifikasi | Sanitasi teks intro dan footer template bot saat pelanggan menyalin form. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Defensive try/catch pada alert owner agar balasan konfirmasi pelanggan tidak pernah terblokir. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Penegasan pemisahan eksekusi tool To-Do vs Orders pada aturan nomor 5. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Sub-node `tool_update_order` terhubung ke AI Agent dan perbaikan `$input.all()` pada Format WAHA ChatId. |
+| `dashboard/tests/unit/update-order-route.test.ts` | Baru | 5 skenario pengujian unit untuk endpoint `update-order` (auth, validation, 404, complete, delete). |
+| `dashboard/tests/unit/customer-core.test.ts` | Modifikasi | Pengujian unit ekstraksi form pesanan yang memuat teks intro dan footer. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 28 test file, **267 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Validasi n8n Workflow:** JSON parsing valid, seluruh graph node terhubung akurat.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-02] Active Order Bot Mute Policy & Customer Session Unmute Integration
+
+### 1. Ringkasan Perbaikan & Fitur
+Mengeliminasi interupsi bot pasca-pesanan dan menyelesaikan integrasi pelepasan kunci sesi pelanggan:
+1. **Active Order Bot Mute Policy di Inbound Gate (`inbound/accept/route.ts`):**
+   - Saat pesan masuk dari nomor non-owner, sistem memeriksa apakah nomor tersebut memiliki pesanan aktif di tabel `orders` yang belum berstatus `[STATUS: SELESAI]`.
+   - Jika pesanan aktif ditemukan, endpoint mengembalikan `{ accept: false, reason: "ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED" }`.
+   - Efek di n8n: Alur langsung dibelokkan ke "Selesai Tanpa Balasan", bot diam 100% sehingga interaksi pelanggan dengan Admin Berseri berjalan lancar tanpa interupsi menu bot.
+2. **Pelepasan Kunci Bot Otomatis Saat Pesanan Selesai / Dihapus (`update-order/route.ts`):**
+   - Saat owner menandai pesanan selesai (`action: "COMPLETE"`) atau menghapus pesanan (`action: "DELETE"` / `"CANCEL"`), sistem secara otomatis mengupdate `customer_sessions` nomor pelanggan terkait (`state: "ACTIVE"`, `paused_at: null`).
+   - Format respons `COMPLETE` menyertakan konfirmasi unmuting: `"Pesanan #ORD-XXXX (Nama) telah ditandai selesai dan lunas. Bot di-unmute untuk nomor pelanggan ini."`
+3. **Penyelarasan Prompt Sistem (`base.id.md`):**
+   - Mempertegas instruksi aturan nomor 5: saat owner meminta selesaikan/hapus pesanan, agen WAJIB memanggil `tool_update_order` dan mengonfirmasi dalam Single-Bubble WhatsApp.
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Implementasi Active Order Bot Mute Policy (`ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED`). |
+| `dashboard/src/app/api/internal/tools/update-order/route.ts` | Modifikasi | Pelepasan kunci bot di `customer_sessions` dan format pesan selesai/unmute. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Penegasan aturan pemanggilan `tool_update_order` pada prompt instruksi sistem. |
+| `dashboard/tests/unit/inbound-accept.test.ts` | Modifikasi | Penambahan pengujian unit Active Order Bot Mute Policy. |
+| `dashboard/tests/unit/update-order-route.test.ts` | Modifikasi | Pengujian unit pelepasan kunci `customerSession.updateMany` saat pesanan selesai. |
+| `updates.md` | Modifikasi | Pencatatan kronologis pembaruan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 28 test file, **268 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Validasi n8n Workflow:** JSON parsing valid, relasi node konsisten.
+4. **Antislop R-02:** Bebas em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-02] Strict Separation of Order Operational Status vs Payment Status
+
+### 1. Ringkasan Perbaikan & Fitur
+Membangun pemisahan resmi antara status operasional (pengerjaan/pengiriman) dan status pembayaran (finansial) pada seluruh lapisan sistem:
+1. **Skema Database & Migrasi Forward-Only (`schema.prisma` & SQL Migration):**
+   - Menambahkan enum baru `OrderStatus` (`PENDING`, `IN_PROGRESS`, `COMPLETED`, `CANCELLED`).
+   - Menambahkan kolom `status OrderStatus @default(PENDING)` dan `completed_at DateTime? @db.Timestamptz` pada model `Order`.
+   - Menambahkan indeks database `@@index([status])` dan `@@index([customer_contact])`.
+   - Membuat file migrasi forward-only `20261102100000_add_order_operational_status/migration.sql` lengkap dengan backfill data pesanan selesai.
+2. **Inbound Gate Bot Mute Refactoring (`inbound/accept/route.ts`):**
+   - Menggantikan pengecekan string kotor pada `notes` dengan kueri enum status deterministik: pesanan dianggap aktif jika `status` bernilai `PENDING` atau `IN_PROGRESS`.
+   - Nomor pelanggan yang seluruh pesanannya sudah `COMPLETED` atau `CANCELLED` otomatis kembali dapat berinteraksi dengan bot.
+3. **Refactoring Tool Update Order (`update-order/route.ts`):**
+   - Memisahkan mutasi operasional dan finansial melalui 7 aksi eksplisit:
+     - `MARK_COMPLETED`: Menandai operasional selesai dan unmuting bot.
+     - `MARK_IN_PROGRESS`: Menandai pengerjaan sedang berlangsung.
+     - `MARK_PAID`: Menandai pembayaran lunas tanpa mengubah status operasional.
+     - `MARK_DP`: Menandai pembayaran DP tanpa mengubah status operasional.
+     - `COMPLETE_AND_PAY`: Menandai operasional selesai sekaligus pembayaran lunas.
+     - `CANCEL`: Membatalkan pesanan dan unmuting bot.
+     - `DELETE`: Menghapus baris pesanan dan unmuting bot.
+4. **Penyesuaian Tool Get Orders (`get-orders/route.ts`):**
+   - Menyaring kueri pesanan aktif hanya untuk `status` in `[PENDING, IN_PROGRESS]`.
+   - Menyertakan label `operational_status` dan `payment_status` secara eksplisit pada respons JSON.
+5. **Penyelarasan Prompt Sistem (`base.id.md`):**
+   - Panduan eksplisit membedakan status operasional dan finansial, pemetaan pemanggilan aksi `tool_update_order`, dan format Single-Bubble WhatsApp.
+6. **Dashboard UI & Orders API (`OrderBoard.tsx`, `api/orders/route.ts`, `api/orders/[id]/route.ts`):**
+   - Menambahkan dropdown selektor dan badge visual utilitarian untuk Status Pengerjaan (PENDING outline netral, IN_PROGRESS terakota aksen, COMPLETED tinta pekat).
+   - Mendukung mutasi PATCH kolom `status` pada endpoint `/api/orders/[id]`.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/prisma/schema.prisma` | Modifikasi | Menambahkan enum `OrderStatus` dan kolom `status`, `completed_at` pada model `Order`. |
+| `dashboard/prisma/migrations/20261102100000_add_order_operational_status/migration.sql` | Baru | Migrasi DDL forward-only untuk penambahan kolom status dan indeks. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Bot mute policy menggunakan kueri enum `status: { in: [PENDING, IN_PROGRESS] }`. |
+| `dashboard/src/app/api/internal/tools/update-order/route.ts` | Modifikasi | Penanganan terpisah aksi status operasional vs pembayaran. |
+| `dashboard/src/app/api/internal/tools/get-orders/route.ts` | Modifikasi | Filter status aktif dan penyertaan field `operational_status`. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Instruksi sistem pemisahan status operasional vs pembayaran. |
+| `dashboard/src/app/api/orders/route.ts` | Modifikasi | Dukungan field `status` pada skema create order. |
+| `dashboard/src/app/api/orders/[id]/route.ts` | Modifikasi | Dukungan update PATCH kolom `status` dan `completed_at`. |
+| `dashboard/src/app/(app)/orders/page.tsx` | Modifikasi | Meneruskan field `status` ke komponen `OrderBoard`. |
+| `dashboard/src/app/(app)/orders/OrderBoard.tsx` | Modifikasi | Selektor dropdown dan badge visual Status Pengerjaan bersanding dengan Status Pembayaran. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Sinkronisasi aksi `tool_update_order` pada deklarasi tool n8n. |
+| `dashboard/tests/unit/update-order-route.test.ts` | Modifikasi | Pengujian unit 7 aksi pembaruan status pesanan. |
+| `dashboard/tests/unit/get-orders-route.test.ts` | Modifikasi | Pengujian field `operational_status` dan `payment_status`. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 28 test file, **271 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Validasi n8n Workflow:** JSON parsing valid, seluruh koneksi tool konsisten.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-02] Visual Pipeline Studio & Modular Container Configurator (/pipeline) with Dynamic Runtime Execution
+
+### 1. Ringkasan Fitur & Arsitektur
+Mengabstraksikan seluruh aturan statis (hardcoded) alur kerja percakapan WhatsApp Botseri ke dalam sistem **Visual Pipeline Studio** modular dengan 6 kontainer yang terkonfigurasi dinamis di database PostgreSQL (`pipeline_configs`):
+1. **Skema Database & Preset Engine (`schema.prisma`, `lib/pipeline/`):**
+   - Menambahkan model `PipelineConfig` (`pipeline_configs`) dengan kolom `config_json` (JSONB), `preset_key`, dan `version`.
+   - Membuat skema validasi Zod `PipelineConfigSchema` untuk 6 kontainer modular:
+     1. `inbound_gate`: Pintu masuk, rate limiting per menit, allow unregistered customers, ignore groups, dan active order bot mute policy.
+     2. `customer_greeting`: Teks sapaan T1, kata kunci order vs tanya-tanya, dan teks reminder T5.
+     3. `order_form`: Template formulir T2, checkbox field wajib, awalan field kurang T6, dan toggle fallback AI LLM.
+     4. `cs_handover`: Pesan handover T3, durasi jeda bot (pause TTL), saklar alert owner, dan template alert T7.
+     5. `order_confirmation`: Template konfirmasi order T4, saklar alert pesanan baru owner, dan template alert pesanan baru.
+     6. `owner_assistant`: Saklar alat operasional to-do, alat manajemen order, dan transkripsi voice note STT.
+   - Menyediakan 3 Preset terkurasi siap pakai:
+     - `FLORIST_DECOR` ("Bisnis Florist & Dekorasi (Default Berseri)")
+     - `GENERIC_COMMERCE` ("UMKM Jasa & Retail Umum")
+     - `PERSONAL_ASSISTANT` ("Asisten Produktivitas Pribadi · Tanpa CS Pelanggan")
+2. **Dynamic Runtime Execution (`inbound/accept` & `customer/handle`):**
+   - Rute masuk membaca konfigurasi aktif via `getActivePipelineConfig()`.
+   - Kata kunci menu, template pesan (T1 s/d T7), validasi kelengkapan form, pembatasan kuota pesan, dan policy bot mute kini sepenuhnya dieksekusi dari konfigurasi pipeline aktif di database.
+3. **API Manajemen Pipeline (`/api/pipeline`):**
+   - `GET /api/pipeline`: Mengembalikan konfigurasi aktif beserta seluruh preset.
+   - `PUT /api/pipeline`: Memperbarui konfigurasi pipeline, menaikkan version, menyinkronkan flag `enable_orders`, dan mencatat event audit `PIPELINE_UPDATED`.
+   - `POST /api/pipeline/reset`: Mengembalikan konfigurasi ke salah satu preset yang dipilih.
+4. **Halaman Visual Pipeline Studio (`/pipeline`):**
+   - Tautan navigasi "Alur Kerja" di bilah menu `AppNav.tsx`.
+   - Peta visual 6 kontainer terhubung hulu ke hilir dengan saklar on/off cepat dan pemilih preset.
+   - Container Inspector & Editor lengkap dengan chip penyisip variabel cepat (`+ {{customer_name}}`, `+ {{order_id}}`, dsb.).
+   - Live WhatsApp Bubble Preview real-time dengan simulasi balon chat WhatsApp untuk menguji tampilan pesan sebelum disimpan.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/prisma/schema.prisma` | Modifikasi | Menambahkan model `PipelineConfig` untuk tabel `pipeline_configs`. |
+| `dashboard/prisma/migrations/20261102200000_add_pipeline_configs/migration.sql` | Baru | Migrasi DDL forward-only untuk tabel `pipeline_configs`. |
+| `dashboard/src/lib/pipeline/schema.ts` | Baru | Skema validasi Zod untuk 6 kontainer pipeline modular. |
+| `dashboard/src/lib/pipeline/presets.ts` | Baru | Preset siap pakai `FLORIST_DECOR`, `GENERIC_COMMERCE`, dan `PERSONAL_ASSISTANT`. |
+| `dashboard/src/lib/pipeline/manager.ts` | Baru | Helper `getActivePipelineConfig` (auto-seed) dan `renderPipelineTemplate` (antislop). |
+| `dashboard/src/app/api/pipeline/route.ts` | Baru | API handler GET dan PUT konfigurasi pipeline aktif terproteksi sesi admin. |
+| `dashboard/src/app/api/pipeline/reset/route.ts` | Baru | API handler POST reset konfigurasi ke preset terpilih. |
+| `dashboard/src/components/AppNav.tsx` | Modifikasi | Menambahkan link "Alur Kerja" (`/pipeline`) pada navigasi utama. |
+| `dashboard/src/app/(app)/pipeline/page.tsx` | Baru | Server component halaman Studio Pipeline. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Baru | Antarmuka visual peta kontainer, inspector editor, chip variabel, dan Live WhatsApp Preview. |
+| `dashboard/src/lib/customer/choice.ts` | Modifikasi | Mendukung kata kunci dinamis `order_trigger_keywords` dan `ask_trigger_keywords`. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Eksekusi runtime gate dinamis (rate limit, allow unregistered, bot mute). |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Eksekusi runtime dinamis untuk sapaan, menu, form, handover, dan konfirmasi. |
+| `dashboard/tests/unit/pipeline.test.ts` | Baru | Unit test skema preset, interpolasi template, dan manager pipeline. |
+| `dashboard/tests/unit/inbound-accept.test.ts` | Modifikasi | Pengujian flag `allow_unregistered_customers: false`. |
+| `dashboard/tests/unit/customer-handle.test.ts` | Modifikasi | Pengujian respons sapaan dinamis dari konfigurasi pipeline. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis fitur. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **281 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas UI, kode, dan template.
+
+---
+
+## [2026-11-03] Interactive Visual Node-Based Workflow Canvas Builder (@xyflow/react + Dynamic Graph Runner)
+
+### 1. Ringkasan Fitur & Arsitektur
+Meng-upgrade halaman `/pipeline` dari kartu statis menjadi **Visual Node-Based Workflow Builder** interaktif berbasis `@xyflow/react` dengan eksekusi graf dinamis di backend:
+1. **Kanvas Alur Kerja Node Interaktif (@xyflow/react):**
+   - Membangun kanvas diagram node penuh (`h-[620px]`) dengan tema editorial dot grid teknikal (`#d8d0c0` di atas `#f4f0e6`), kontrol zoom/pan, dan minimap.
+   - Mendukung manipulasi interaktif: drag and drop posisi node, seleksi node, penambahan kabel koneksi (*edges*) antar port, serta penghapusan kabel dan node tambahan.
+   - Kartu node kustom (`PipelineNodeCard`) bertipografi tajam dengan badge peran berwarna, status aktif/nonaktif, ringkasan data, port input target (kiri), dan port output source (kanan) berlabel jelas.
+2. **Katalog Tipe Node Modular (`PipelineNodeTypeEnum`):**
+   - `TRIGGER_INBOUND`: Pintu masuk & filter (port `out_customer`, `out_owner`).
+   - `MESSAGE_MENU`: Kirim chat sapaan & menu teks (port `out_next`).
+   - `CONDITION_ROUTER`: Router percabangan kata kunci (port `branch_1`, `branch_2`, `branch_custom`, `branch_fallback`).
+   - `ORDER_FORM_PROCESSOR`: Formulir pesanan & validasi (port `out_valid`, `out_incomplete`).
+   - `CS_HANDOVER`: Jeda bot & handover owner (port `out_done`).
+   - `ORDER_FULFILLMENT`: Konfirmasi pesanan & alert admin (port `out_done`).
+   - `CUSTOM_WA_REPLY`: Kirim chat kustom bebas rantai (port `out_next`), dapat ditambahkan berkali-kali.
+   - `OWNER_AI_AGENT`: Asisten operasional internal pemilik.
+3. **Eksekusi Rantai Node Kustom & Cabang Dinamis (`graph-runner.ts`):**
+   - `syncGraphToCoreConfig`: Menyinkronkan perubahan konfigurasi pada node kanvas ke 6 kontainer inti database agar seluruh endpoint internal tetap 100% kompatibel.
+   - `executeChainedCustomNodes`: Menelusuri kabel koneksi dari port output untuk mengeksekusi satu atau beberapa node `CUSTOM_WA_REPLY` (misal cabang menu 3 kustom atau rantai pesan bonus pasca-order).
+   - Terintegrasi langsung ke `customer/handle/route.ts` pada evaluasi cabang kata kunci kustom dan konfirmasi order.
+4. **Simulator Alur Kerja Interaktif (Execute Workflow Simulator):**
+   - Bilah simulator di bawah kanvas untuk menguji pengiriman pesan (Pelanggan / Owner) dengan berbagai state sesi (`INIT`, `AWAITING_CHOICE`, `AWAITING_ORDER`, `ACTIVE`, `PAUSED_FOR_OWNER`).
+   - Menyorot (*highlight*) secara visual node yang dilalui dengan border terakota tebal `#9a3412` dan kabel koneksi animasi berdenyut (*animated smoothstep edges*).
+   - Menyajikan log eksekusi dan pratinjau balon chat WhatsApp yang dihasilkan secara instan.
+5. **Inspektor Kontainer & Live WhatsApp Bubble Preview:**
+   - Panel editor terintegrasi saat node dipilih: edit label, template pesan, chip penyisip variabel cepat (`+ {{customer_name}}`, `+ {{order_id}}`, dsb.), kata kunci percabangan, dan target penerima.
+   - Pratinjau balon chat WhatsApp real-time di samping formulir editor.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/package.json` | Modifikasi | Menambahkan dependensi `@xyflow/react` v12. |
+| `dashboard/src/lib/pipeline/schema.ts` | Modifikasi | Menambahkan `PipelineNodeTypeEnum`, `PipelineGraphNodeSchema`, `PipelineGraphEdgeSchema`, dan `PipelineGraphSchema`. |
+| `dashboard/src/lib/pipeline/presets.ts` | Modifikasi | Menambahkan struktur koordinat graf visual bawaan untuk ketiga preset. |
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Baru | Mesin penjelajah graf dinamis, sinkronisasi kontainer inti, eksekusi rantai node kustom, dan simulator alur kerja. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Integrasi eksekusi percabangan kustom dan rantai node kustom pasca-order. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Penggantian kanvas statis menjadi visual node builder interaktif berbasis `@xyflow/react`. |
+| `dashboard/tests/unit/pipeline.test.ts` | Modifikasi | Pengujian struktur graf preset, eksekusi rantai kustom, dan simulator kanvas. |
+| `updates.md` | Modifikasi | Pencatatan kronologis pembaruan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **287 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Next.js Standalone Build:** `npm run build` sukses mengompilasi seluruh 27 route dan kanvas React Flow.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas UI, kode, dan template.
+
+---
+
+## [2026-11-03] Fix React Flow Handle Drag-and-Connect & Implement Slide-Over Node Inspector Drawer
+
+### 1. Ringkasan Perbaikan
+Mengatasi kendala kegagalan drag kabel pada handle port kanvas dan menyediakan panel inspektor kontainer slide-over yang interaktif:
+1. **Perbaikan Handle Port Koneksi (@xyflow/react):**
+   - Menyematkan atribut `isConnectable={true}` pada seluruh komponen `<Handle />` resmi `@xyflow/react`.
+   - Mengatur dimensi port sentuh presisi 14x14px (`!w-3.5 !h-3.5`) dengan styling taktil `!bg-stone-800 !border-2 !border-stone-100 hover:!bg-[#9a3412] hover:!scale-125 cursor-crosshair !z-30`.
+   - Memposisikan port target di sisi kiri dengan offset `style={{ left: -7 }}` dan seluruh cabang port source di sisi kanan dengan offset `style={{ right: -7 }}` pada pembungkus baris terpisah.
+   - Menambahkan event dan konfigurasi kanvas `<ReactFlow>`: `onConnect`, `onNodeClick`, `onPaneClick`, `nodesDraggable={true}`, `nodesConnectable={true}`, dan `elementsSelectable={true}`.
+   - Kartu node mendapatkan kelas `cursor-pointer select-none` serta penanda outline terakota tebal (`ring-2 ring-[#9a3412] shadow-md`) saat dipilih.
+2. **Slide-Over Node Inspector Drawer:**
+   - Membangun panel samping geser (*slide-over drawer*) berukuran lebar 460px (`w-[460px]`) yang otomatis terbuka saat kartu node diklik di kanvas, dan menutup saat area kosong kanvas diklik (`onPaneClick`) atau tombol tutup (x) ditekan.
+   - Menyajikan diagram alur mini teks teknis langkah proses untuk masing-masing dari 8 tipe kontainer.
+   - Formulir parameter interaktif: edit nama/label, template pesan WhatsApp dengan chip variabel cepat (`+ {{customer_name}}`, `+ {{order_id}}`, dsb.), kata kunci percabangan, checkbox field wajib, dan pemilihan target penerima chat kustom.
+   - Live WhatsApp Bubble Preview real-time terintegrasi di dalam panel samping.
+   - Tombol aksi `[ Terapkan Perubahan ke Node ]` dan `[ Hapus Node ]` (untuk kontainer tambahan).
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Perbaikan komponen `<Handle>` resmi dengan `isConnectable`, offset tepi kartu, event kanvas React Flow, dan panel slide-over drawer inspektor. |
+| `updates.md` | Modifikasi | Dokumentasi kronologis perbaikan interaktivitas kanvas. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **287 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-03] Dynamic Branch Router, Auto-Expanding Textarea, Live WhatsApp Markdown, Canvas Panel, & Drawer Depth of Field
+
+### 1. Ringkasan Perbaikan & Fitur
+Menyempurnakan antarmuka visual Studio Pipeline (/pipeline) dan fleksibilitas percabangan dinamis:
+1. **Dynamic Branch Router & Auto-Spawning Field (`CONDITION_ROUTER`):**
+   - Mendukung array cabang kustom `branches` (`id`, `label`, `keywords`) di skema node dan presets.
+   - Mekanisme auto-spawning: Saat cabang terakhir (misal cabang ke-3) diisi kata kunci, sistem secara otomatis menambahkan baris cabang baru kosong di bawahnya (cabang ke-4).
+   - Menyediakan tombol hapus (`x`) pada cabang kustom untuk menghapus cabang yang tidak terpakai.
+   - Port handle output source pada kartu node kanvas (`PipelineNodeCard`) bertambah dan berkurang secara reaktif mengikuti jumlah cabang aktif.
+   - Mendukung penelusuran graf dan pengeksekusian cabang kustom di runtime (`customer/handle` dan `simulatePipelineExecution`).
+2. **Auto-Expanding Textarea:**
+   - Komponen `AutoExpandingTextarea` yang secara otomatis menyesuaikan tinggi (`scrollHeight`) sesuai panjang teks pesan (rentang min 120px hingga maks 500px) tanpa memotong isi formulir order atau template pesan panjang.
+3. **Live WhatsApp Markdown Formatter (`whatsapp-formatter.tsx`):**
+   - Modul parser Markdown khas WhatsApp yang mengubah `*teks*` menjadi tebal (`<strong>teks</strong>`), `_teks_` menjadi miring (`<em>teks</em>`), `~teks~` menjadi coret (`<del>teks</del>`), ````kode```` menjadi kode inline, dan `\n` menjadi jeda baris.
+   - Terintegrasi langsung pada balon simulasi chat WhatsApp sehingga tanda bintang otomatis hilang dan kata di dalamnya tampil tebal sesuai aplikasi WhatsApp riil.
+4. **Depth of Field (DoF) & Transisi Drawer Inspektor:**
+   - Menambahkan lapisan latar belakang peredup dengan efek blur (`bg-stone-950/40 backdrop-blur-[3px]`) di belakang drawer untuk memisahkan fokus panel inspektor dari kanvas.
+   - Transisi geser halus (*slide-in-from-right*) dan penutupan otomatis saat backdrop diklik atau tombol `Escape` ditekan.
+5. **Integrasi Toolbar Kanvas (`<Panel position="top-left" />`):**
+   - Memindahkan tombol `[ + Tambah Kontainer ]` dan `[ Rapikan Tata Letak ]` langsung menyatu ke sudut kiri-atas bidang kanvas React Flow tanpa mengganggu navigasi pan/zoom.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/pipeline/whatsapp-formatter.tsx` | Baru | Parser Markdown WhatsApp untuk balon simulasi chat (`WhatsAppFormattedText`). |
+| `dashboard/src/lib/pipeline/schema.ts` | Modifikasi | Skema `RouterBranchSchema` dan `ConditionRouterDataSchema`. |
+| `dashboard/src/lib/pipeline/presets.ts` | Modifikasi | Data bawaan `branches` untuk `node-router` pada seluruh preset. |
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Modifikasi | Penelusuran graf untuk array `branches` dinamis pada simulator dan compiler. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Eksekusi runtime cabang kustom dari array `branches`. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Auto-expanding textarea, handles dinamis router, WhatsApp markdown preview, backdrop DoF, dan React Flow panel. |
+| `dashboard/tests/unit/pipeline.test.ts` | Modifikasi | Pengujian unit parser markdown WhatsApp dan rute percabangan dinamis. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **289 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-03] Fix Keyword Input Typing Bug, Sequential Branch Re-indexing, Full Container Catalog (Singleton Trigger), Deletable Edges, & Handle Hover UX
+
+### 1. Ringkasan Perbaikan
+Memperbaiki 5 kendala interaktivitas dan fungsionalitas kanvas Studio Pipeline (/pipeline):
+1. **Perbaikan Input Kata Kunci Bebas Karakter (Bug 1):**
+   - Menyimpan properti `raw_input` pada objek cabang kata kunci router sehingga pengguna bebas mengetik spasi, koma, titik, atau tanda baca tanpa karakter terakhir terhapus otomatis oleh `.trim()`.
+   - Ekstraksi array `keywords` berjalan di latar belakang secara bersih.
+2. **Normalisasi & Re-indexing Berurutan Cabang Kustom (Bug 2):**
+   - Membuat fungsi deterministik `normalizeCustomBranches`: saat cabang dihapus (misal Cabang 3 dihapus), nomor cabang di bawahnya otomatis di-renumber secara berurutan mulai dari angka 3 (`Cabang 3 (Kustom)`, `Cabang 4 (Kustom)`, dsb.) tanpa melompat.
+   - Menyelaraskan `sourceHandle` pada kabel `edges` yang terhubung secara otomatis saat ID cabang bergeser.
+   - Selalu menambahkan tepat 1 cabang kustom kosong di urutan akhir sebagai slot *auto-spawning*.
+3. **Katalog Kontainer Lengkap 8 Modul & Aturan Singleton Pintu Masuk (Bug 3):**
+   - Memperluas modal "Pilih Tipe Kontainer Baru" menampilkan seluruh 8 tipe kontainer modular (`TRIGGER_INBOUND`, `MESSAGE_MENU`, `CONDITION_ROUTER`, `ORDER_FORM_PROCESSOR`, `ORDER_FULFILLMENT`, `CS_HANDOVER`, `CUSTOM_WA_REPLY`, `OWNER_AI_AGENT`).
+   - Aturan Singleton: Jika `TRIGGER_INBOUND` sudah terpasang di kanvas, kartu kontainer tersebut ditampilkan nonaktif (*disabled*) dengan badge `"Sudah Terpasang · Maks 1"`.
+4. **Kabel Deletable & Section Koneksi Kabel di Inspektor (Bug 4):**
+   - Membuat komponen kustom `PipelineDeletableEdge.tsx` (`BaseEdge`, `EdgeLabelRenderer`, `getSmoothStepPath`) yang merender tombol bulat `x` tepat di tengah jalur kabel untuk memutuskan kabel secara instan.
+   - Mengaktifkan `deleteKeyCode={["Backspace", "Delete"]}`, `edgesFocusable={true}`, dan `edgesReconnectable={true}` pada kanvas `<ReactFlow>`.
+   - Menambahkan section "Koneksi Kabel Terhubung" di dalam Panel Inspektor Kontainer yang menampilkan daftar kabel masuk dan keluar lengkap dengan tombol `[ Putuskan ]`.
+5. **Stabilisasi Titik Handle Port Tanpa Efek Melompat (Bug 5):**
+   - Menghapus seluruh class `hover:!scale-125` dan `transition-transform` yang bertabrakan dengan CSS `transform` bawaan React Flow.
+   - Menggantikannya dengan efek pembesaran ring fokus yang stabil (`hover:!ring-4 hover:!ring-[#9a3412]/25 !transition-shadow !duration-150`).
+   - Memposisikan titik handle tepat vertikal di tengah baris port (`top: "50%"`) sehingga handle tidak pernah bergeser dari kursor saat disentuh.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/(app)/pipeline/PipelineDeletableEdge.tsx` | Baru | Komponen kabel kustom deletable dengan tombol putuskan kabel dan label port. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Helper `normalizeCustomBranches`, raw_input state, katalog 8 kontainer dengan singleton trigger, section koneksi kabel inspektor, dan stabilisasi hover handle. |
+| `dashboard/tests/unit/pipeline.test.ts` | Modifikasi | Pengujian unit fungsi `normalizeCustomBranches`, auto-spawning, dan re-indexing kabel. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **291 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-03] Fix Editable Branch Labels, Edge Labels on Connect, Dynamic Graph Runtime Execution, & Anti-Bisu Fallback
+
+### 1. Ringkasan Perbaikan
+Memperbaiki 3 masalah pada Studio Pipeline dan runtime eksekusi percabangan dinamis bot WhatsApp:
+1. **Label Cabang Kustom Editable (Section A):**
+   - Menyediakan 2 kolom input di Panel Inspektor Kontainer `CONDITION_ROUTER`: Kolom 1 (Kiri, lebar 36%) untuk Label Port (misal `Katalog Menu` atau `Pilihan 3 (Katalog)`), dan Kolom 2 (Kanan) untuk Kata Kunci.
+   - Menambahkan handler `handleBranchLabelChange` yang menyinkronkan label cabang kustom ke kartu kanvas (`PipelineNodeCard`) dan kabel yang terhubung.
+   - Memperbarui `normalizeCustomBranches` agar tidak menimpa nama label kustom yang sudah diisi oleh pengguna saat normalisasi cabang.
+2. **Otomatisasi Label pada Kabel Koneksi (Section B):**
+   - Memperbarui fungsi `onConnect` di `PipelineStudio.tsx` agar secara otomatis memberikan label deskriptif sesuai port sumber (`Pilihan 1 · Order`, `Pilihan 2 · Tanya CS`, `Pilihan · <Nama Cabang>`, `Pelanggan Baru`, `Nomor Owner`, `Form Lengkap`, dsb.).
+   - Menyempurnakan komponen `PipelineDeletableEdge.tsx` agar merender teks label di dalam pill bulat (`rounded-full`) berdampingan dengan tombol putuskan kabel `✕`.
+3. **Sinkronisasi Runtime Graf Dinamis & Defensive Fallback Anti-Bisu (Section C):**
+   - Menghubungkan eksekusi percabangan dinamis di `/api/internal/customer/handle/route.ts` dengan graf visual yang tersimpan di database (`pipeline.config.graph.nodes` dan `edges`).
+   - Saat pelanggan mengirim pesan pilihan kustom (misal "3" untuk cabang Katalog Menu) di status `AWAITING_CHOICE`, route handler mengeksekusi rantai node target (`CUSTOM_WA_REPLY`), merender template pesan, dan memperbarui sesi di database.
+   - Memperbaiki `executeChainedCustomNodes` di `graph-runner.ts` agar mencocokkan `sourceHandle` secara akurat dan menggunakan `trigger_type: "CUSTOMER_REPLY"`. Menambahkan `CUSTOM_REPLY` ke enum triggers di `/api/internal/waha/send/route.ts`.
+   - Menerapkan **Defensive Fallback (Anti-Bisu)**: Jika pesan pelanggan tidak cocok dengan opsi mana pun di status `AWAITING_CHOICE`, endpoint dijamin 100% selalu mengembalikan pesan pengingat sopan (`fallback_reply_text` atau `unrecognized_choice_text`) dan DILARANG KERAS mengembalikan array balasan kosong atau membiarkan bot membisu di WhatsApp.
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/(app)/pipeline/PipelineDeletableEdge.tsx` | Modifikasi | Pill label bulat dengan rendering teks label port dan tombol putuskan kabel `✕`. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Dua kolom input editor cabang (Label & Kata Kunci), preservasi label kustom di `normalizeCustomBranches`, sinkronisasi label kartu kanvas, dan `onConnect` auto-label. |
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Modifikasi | Filter `sourceHandle` presisi, dukungan template ganda, dan `trigger_type: "CUSTOMER_REPLY"`. |
+| `dashboard/src/app/api/internal/waha/send/route.ts` | Modifikasi | Penambahan `CUSTOM_REPLY` ke whitelist skema `triggers`. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Eksekusi runtime graf cabang kustom dari database dan mekanisme anti-bisu defensive fallback. |
+| `dashboard/tests/unit/pipeline.test.ts` | Modifikasi | Pengujian unit preservasi label cabang kustom pengguna dan sinkronisasi label edge. |
+| `dashboard/tests/unit/customer-handle.test.ts` | Modifikasi | Pengujian integrasi Case 10 (eksekusi cabang kustom database) dan Case 11 (defensive fallback anti-bisu). |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **294 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-03] Fix Dynamic Message Extraction for Chained MESSAGE_MENU & Implement Nested Sub-Router Execution
+
+### 1. Ringkasan Perbaikan
+Memperbaiki 3 kendala rantai alur pesan dinamis dan navigasi sub-menu bertingkat:
+1. **Polymorphic Message Extractor (`extractNodeMessageText`) (Section A):**
+   - Membuat fungsi pembantu `extractNodeMessageText` di `dashboard/src/lib/pipeline/graph-runner.ts` yang mampu membaca teks secara polimorfik dari berbagai tipe kontainer node (`message_template`, `greeting_text`, `message_text`, `form_template_text`, `handover_customer_text`, `customer_confirmation_template`, `body`).
+   - Memperbarui `executeChainedCustomNodes` agar mendukung rantai kontainer bertipe `MESSAGE_MENU` selain `CUSTOM_WA_REPLY`.
+2. **Pembersihan String Dummy & Navigasi Sub-Router Simulator (Section B):**
+   - Menghapus 100% string placeholder tiruan `(Cabang ... Tereksekusi)` pada `simulatePipelineExecution`.
+   - Simulator kini mengekstrak dan merender teks nyata dari node tujuan menggunakan `renderPipelineTemplate`.
+   - Jika node tujuan terhubung keluar (`out_next`) ke node `CONDITION_ROUTER` lain (Sub-Router), simulator mendeteksi router turunan tersebut, menetapkan `active_router_id`, dan mencatat perpindahan di log simulator (`Navigasi ke sub-menu: [Nama Router]`).
+   - Pada giliran pesan berikutnya, simulator menerima `currentRouterId` dan mengevaluasi kata kunci dari router turunan tersebut (misal pilihan 1 mengarah ke Formulir Order milik sub-menu).
+3. **Penyelarasan Runtime WhatsApp Nyata via Pointer `current_router_id` (Section C):**
+   - Memanfaatkan pointer `current_router_id` di kolom JSONB `metadata` pada tabel `customer_sessions`.
+   - Saat pelanggan membalas pesan di status `AWAITING_CHOICE`, endpoint `/api/internal/customer/handle/route.ts` memprioritaskan evaluasi kata kunci pada router yang sedang aktif (`current_router_id`).
+   - Saat sub-menu terpilih dan memiliki kabel `out_next` ke router baru, ID router turunan otomatis disimpan ke `metadata.current_router_id`.
+   - Saat pelanggan melanjutkan alur ke order atau handover, pointer `current_router_id` dibersihkan (`null`) dan state berpindah sesuai alur.
+4. **Sinkronisasi Reaktif Preview Kartu `MESSAGE_MENU` (Section D):**
+   - Memperbarui kartu `MESSAGE_MENU` di kanvas (`PipelineNodeCard`) agar membaca `message_text || greeting_text` sehingga teks sub-menu langsung tampil secara reaktif saat diedit di panel inspektor.
+   - Menyinkronkan `simActiveRouterId` pada antarmuka simulator `PipelineStudio.tsx`.
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Modifikasi | Fungsi `extractNodeMessageText`, dukungan `MESSAGE_MENU` pada `executeChainedCustomNodes`, hapus mock strings, dan nested sub-router navigation di `simulatePipelineExecution`. |
+| `dashboard/src/app/(app)/pipeline/PipelineStudio.tsx` | Modifikasi | Sinkronisasi `simActiveRouterId` simulator dan fallback `message_text \|\| greeting_text` kartu `MESSAGE_MENU`. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Navigasi router bertingkat via pointer `session.metadata.current_router_id` di database runtime WhatsApp. |
+| `dashboard/tests/unit/pipeline.test.ts` | Modifikasi | Pengujian unit `extractNodeMessageText` polimorfik dan simulasi rantai sub-router dua tahap (pilihan 3 -> sub-menu -> pilihan 1 order). |
+| `dashboard/tests/unit/customer-handle.test.ts` | Modifikasi | Pengujian integrasi Case 12 untuk nested sub-router runtime WhatsApp nyata. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **297 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-03] Fix Initial Greeting Node Target Resolution (Trace Trigger Edge) & Auto-Heal Contaminated Config
+
+### 1. Ringkasan Perbaikan
+Memperbaiki anomali pesan sapaan awal saat pelanggan baru chat pertama kali (`state: INIT`):
+1. **Pencegahan Kontaminasi di `syncGraphToCoreConfig` (Section A):**
+   - Membatasi sinkronisasi properti `customer_greeting.greeting_text` HANYA dari kontainer sapaan awal (`rootGreetingNode`) yang terhubung langsung dari port `out_customer` pada `TRIGGER_INBOUND` (atau `id === 'node-greeting'`).
+   - Mencegah kontainer sub-menu tambahan (`custom-message_menu-*` seperti sub-menu katalog) menimpa teks sapaan selamat datang utama.
+2. **Edge Tracing Murni pada Status Awal (INIT) (Section B):**
+   - **Di Simulator (`simulatePipelineExecution`)**: Saat pesan pertama masuk pada `INIT`, simulator menelusuri kabel `customerEdge` dari `TRIGGER_INBOUND` port `out_customer` untuk menemukan node sapaan awal dan mengekstrak teks aslinya via `extractNodeMessageText`. Menandai kabel dan node sapaan sebagai aktif di simulator.
+   - **Di Runtime WhatsApp (`customer/handle/route.ts`)**: Saat aksi `SEND_GREETING` dieksekusi, handler menelusuri kabel dari `TRIGGER_INBOUND` ke node sapaan awal pada graf visual untuk mengambil teks selamat datang yang autentik.
+3. **Auto-Heal Konfigurasi Database PostgreSQL (Section C):**
+   - Pada `getActivePipelineConfig` di `dashboard/src/lib/pipeline/manager.ts`, sistem mendeteksi secara otomatis jika `customer_greeting.greeting_text` sebelumnya terlanjur tertimpa teks katalog atau link `drive.google.com`.
+   - Secara otomatis memulihkan kembali nilai `greeting_text` ke teks selamat datang autentik Berseri dari `node-greeting` atau preset bawaan, dan menyimpan perbaikan tersebut ke tabel `pipeline_configs` di PostgreSQL.
+
+### 2. Berkas Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/pipeline/graph-runner.ts` | Modifikasi | Filter `rootGreetingNode` pada `syncGraphToCoreConfig` dan edge tracing sapaan awal pada `simulatePipelineExecution`. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Edge tracing sapaan awal dari `TRIGGER_INBOUND` port `out_customer` pada aksi `SEND_GREETING`. |
+| `dashboard/src/lib/pipeline/manager.ts` | Modifikasi | Mekanisme auto-heal di `getActivePipelineConfig` untuk memulihkan konfigurasi sapaan yang tertimpa link katalog. |
+| `dashboard/tests/unit/pipeline.test.ts` | Modifikasi | Pengujian unit auto-heal `customer_greeting`, isolasi `syncGraphToCoreConfig` dari sub-menu, dan simulasi INIT via edge tracing. |
+| `dashboard/tests/unit/customer-handle.test.ts` | Modifikasi | Pengujian integrasi Case 13 untuk pesan awal INIT yang kebal terhadap kontaminasi sub-menu katalog. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 29 test file, **301 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+---
+
+## [2026-11-04] Fix Order Status Filtering in Todos Tool, Auto-Unmute Customer Sessions on Completion, and Support Bulk Order Complete
+
+### 1. Ringkasan Perbaikan
+Memperbaiki kebocoran pesanan selesai pada to-do tool, mengimplementasikan auto-unmute sesi pelanggan saat order selesai, dan menambahkan dukungan aksi massal (bulk):
+1. **Filter Ketat Status & Tanggal `upcoming_orders` di To-Do Tool (Section A):**
+   - Pada `dashboard/src/app/api/internal/tools/get-prioritized-todos/route.ts`, kueri `upcomingOrders` sekarang memfilter secara ketat `status: { in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] }` dan `event_date: { gte: startOfDayWib }`.
+   - Pesanan yang sudah berstatus `COMPLETED` atau `CANCELLED` maupun pesanan lampau tidak akan pernah lagi bocor ke respon to-do WhatsApp owner.
+   - Jika seluruh pesanan telah selesai, `upcoming_orders` bernilai array kosong `[]` dan `total_upcoming_orders: 0`.
+2. **Auto-Unmute Pelanggan Saat Pesanan Selesai di Dashboard UI (Section B):**
+   - Pada `dashboard/src/app/api/orders/[id]/route.ts`, saat status operasional pesanan diubah menjadi `COMPLETED`, sistem secara otomatis membuka kunci sesi pelanggan terkait di tabel `customer_sessions` (`state: "ACTIVE"`, `paused_at: null`, reset draft & retry count).
+3. **Auto-Heal Sesi Pelanggan di Inbound Gate (Section C):**
+   - Pada `dashboard/src/app/api/internal/inbound/accept/route.ts`, saat pesan masuk dari pelanggan yang TIDAK memiliki pesanan aktif (`PENDING` atau `IN_PROGRESS`), sistem secara otomatis me-reset sesi yang sempat ter-pause (`paused_at: null`, `state: "ACTIVE"`) sehingga bot segera membalas chat pelanggan tanpa membisu.
+   - Jika pesanan aktif masih ada dan `mute_bot_on_active_order` aktif, bot tetap hening (`ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED`) agar admin bebas mengobrol manual.
+4. **Dukungan Aksi Massal (Bulk) di `tool_update_order` (Section D):**
+   - Memperbarui `dashboard/src/app/api/internal/tools/update-order/route.ts` untuk menerima `order_id: "ALL"` atau `"SEMUA"`.
+   - Mengambil seluruh pesanan aktif (`PENDING` dan `IN_PROGRESS`), menandainya sebagai `COMPLETED` (dan `PAID` jika `COMPLETE_AND_PAY` / `MARK_PAID`), membuka kunci sesi seluruh pelanggan terkait, dan mengembalikan pesan ringkasan jumlah pesanan yang diselesaikan.
+   - Jika tidak ada pesanan aktif, mengembalikan pesan bahwa semua pesanan memang sudah berstatus selesai sebelumnya.
+   - Memperbarui deskripsi tool dan parameter `order_id` di `n8n-engine/workflows/botseri-inbound-agent.json`.
+5. **Penyelarasan Prompt Sistem Agent (Section E):**
+   - Pada `dashboard/src/lib/prompt/templates/base.id.md`, melarang LLM menampilkan bagian "Pesanan mendatang" jika data `upcoming_orders` dari tool bernilai kosong.
+   - Menambahkan instruksi eksplisit: jika owner meminta menyelesaikan seluruh/semua pesanan, LLM wajib memanggil `tool_update_order` dengan parameter `order_id: "ALL"` dan `action: "MARK_COMPLETED"` (atau `"COMPLETE_AND_PAY"`).
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/app/api/internal/tools/get-prioritized-todos/route.ts` | Modifikasi | Filter `status: [PENDING, IN_PROGRESS]` dan `event_date: gte startOfDayWib` pada `upcoming_orders`. |
+| `dashboard/src/app/api/orders/[id]/route.ts` | Modifikasi | Auto-unmute sesi pelanggan di `customer_sessions` saat order ditandai `COMPLETED`. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Auto-heal sesi pelanggan saat tidak ada pesanan aktif (`paused_at: null`, `state: "ACTIVE"`). |
+| `dashboard/src/app/api/internal/tools/update-order/route.ts` | Modifikasi | Penanganan aksi massal (`order_id: "ALL" \| "SEMUA"`) dan auto-unmute massal. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Pembaruan deskripsi tool `tool_update_order` dan placeholder parameter `order_id: ALL`. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Penyelarasan prompt: larangan sebut pesanan jika kosong dan instruksi bulk complete `order_id: 'ALL'`. |
+| `dashboard/tests/unit/get-prioritized-todos-route.test.ts` | Baru | Pengujian unit filter status dan tanggal pada endpoint `get-prioritized-todos`. |
+| `dashboard/tests/unit/api-orders-id-route.test.ts` | Baru | Pengujian unit auto-unmute sesi pelanggan saat order berstatus `COMPLETED` di dashboard UI. |
+| `dashboard/tests/unit/update-order-route.test.ts` | Modifikasi | Pengujian unit aksi massal `ALL` dan `SEMUA` pada `tool_update_order`. |
+| `dashboard/tests/unit/inbound-accept.test.ts` | Modifikasi | Pengujian unit auto-heal sesi pelanggan saat tidak ada pesanan aktif. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 31 test file, **310 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.

@@ -1,0 +1,115 @@
+# Botseri — Docker Compose (ARCHITECTURE.md §4.3)
+name: botseri
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  botseri-db:
+    <<: *restart
+    container_name: botseri-db
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - botseri_pgdata:/var/lib/postgresql/data
+    networks: [botseri-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  botseri-dashboard:
+    <<: *restart
+    container_name: botseri-dashboard
+    build: ./dashboard
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@botseri-db:5432/${POSTGRES_DB}
+      WAHA_URL: http://botseri-waha:3000
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      WAHA_MOCK_OUTBOUND: ${WAHA_MOCK_OUTBOUND:-0}
+      WAHA_FAST_TEST: ${WAHA_FAST_TEST:-0}
+    depends_on:
+      botseri-db: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:3000:3000"   # akses lokal opsional; tunnel memakai nama service
+    networks: [botseri-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/internal/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  botseri-waha:
+    <<: *restart
+    container_name: botseri-waha
+    image: devlikeapro/waha:${WAHA_VERSION}
+    # shortcut: image WAHA hanya amd64; hapus saat tag arm64 tersedia.
+    platform: linux/amd64
+    environment:   # [VERIFY] nama variabel terhadap dokumentasi versi yang di-pin
+      WAHA_API_KEY: ${WAHA_API_KEY}
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      WAHA_NOWEB_WA_VERSION: auto-web
+      WHATSAPP_HOOK_URL: http://botseri-n8n:5678/webhook/wa-incoming
+      WHATSAPP_HOOK_EVENTS: message
+      WHATSAPP_START_SESSION: ${WAHA_SESSION}
+      WHATSAPP_RESTART_ALL_SESSIONS: "true"
+      WAHA_DASHBOARD_ENABLED: "false"
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      WAHA_PRINT_QR: "true"
+    volumes:
+      - botseri_wahadata:/app/.sessions
+    networks: [botseri-net]
+
+  botseri-n8n:
+    <<: *restart
+    container_name: botseri-n8n
+    build:
+      context: ./n8n-engine
+      args:
+        N8N_VERSION: ${N8N_VERSION}
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_DISABLE_UI: "true"          # [VERIFY] nama dan perilaku pada versi yang di-pin
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"   # workflow membaca $env untuk URL/token
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      GENERIC_TIMEZONE: ${TZ_DEFAULT}
+      TZ: ${TZ_DEFAULT}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
+      DASHBOARD_URL: http://botseri-dashboard:3000
+      WAHA_URL: http://botseri-waha:3000
+      WAHA_API_KEY: ${WAHA_API_KEY}
+      WAHA_SESSION: ${WAHA_SESSION}
+    volumes:
+      - botseri_n8ndata:/home/node/.n8n
+      - ./n8n-engine/workflows:/workflows:ro
+    depends_on:
+      botseri-dashboard: { condition: service_healthy }
+      botseri-waha: { condition: service_started }
+    networks: [botseri-net]
+
+  botseri-tunnel:
+    <<: *restart
+    container_name: botseri-tunnel
+    image: cloudflare/cloudflared:${CLOUDFLARED_VERSION}
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      botseri-dashboard: { condition: service_healthy }
+    networks: [botseri-net]
+    profiles: ["tunnel"]
+
+networks:
+  botseri-net:
+    name: botseri-net
+
+volumes:
+  botseri_pgdata:
+  botseri_n8ndata:
+  botseri_wahadata:
