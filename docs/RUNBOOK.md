@@ -41,12 +41,11 @@ Akses halaman `http://localhost:3000/status` (atau melalui domain panel owner). 
 | **WAHA** | WORKING | SCAN_QR_CODE / FAILED / UNREACHABLE | Buka menu Integrasi untuk scan QR atau restart container WAHA. |
 | **Google** | CONNECTED | NEEDS_REAUTH / DISCONNECTED | Otorisasi ulang akun Google di menu Integrasi. |
 | **LLM Aktif** | Provider dan Model tampil | Belum dikonfigurasi | Tambahkan dan aktifkan konfigurasi model di menu Integrasi. |
-| **Detak Scheduler** | SEGAR (umur < 30 menit) | STALE (umur > 30 menit) / NEVER | Banner amber muncul. Periksa apakah container n8n berjalan dan periksa log tick. |
+| **Detak Scheduler** | SEGAR (umur < SCHEDULER_STALE_MINUTES, default 3 menit) | STALE (umur > ambang) / NEVER | Banner amber muncul. Periksa apakah container n8n berjalan dan periksa log tick. |
 | **Sinkronisasi Google** | LANCAR (0 tertunda) | N TERTUNDA / MACET | Bila ada tugas dengan percobaan >= 8, intervensi manual diperlukan. |
 
 #### Banner Amber Detak Scheduler
-Jika detak scheduler tidak tercatat selama lebih dari 30 menit, banner peringatan amber akan muncul di bagian atas halaman `/status`. Mengingat scheduler berjalan tiap 15 menit, kondisi ini menandakan sedikitnya dua siklus detak terlewat. Segera periksa status container `botseri-n8n`.
-
+Jika detak scheduler tidak tercatat lebih dari ambang `SCHEDULER_STALE_MINUTES` (default 3 menit), banner peringatan amber akan muncul di bagian atas halaman `/status`. Mengingat scheduler berjalan tiap 1 menit, kondisi ini menandakan sedikitnya tiga siklus detak terlewat. Segera periksa status container `botseri-n8n` dan log scheduler.
 ---
 
 ## 2. Pengelolaan WhatsApp (WAHA)
@@ -98,10 +97,26 @@ Status job:
 - `SKIPPED`: Job sengaja dilewati karena kondisi bisnis (misalnya bukan hari kerja, hari libur nasional, atau tidak ada tugas aktif).
 
 ### 4.2 Retry Sinkronisasi Google
-Dashboard secara otomatis mencoba ulang sinkronisasi to-do yang berstatus `PENDING` atau `FAILED` setiap siklus tick (15 menit):
+Dashboard secara otomatis mencoba ulang sinkronisasi to-do yang berstatus `PENDING` atau `FAILED` setiap 5 menit (pada menit yang habis dibagi 5, agar pemrosesan alarm tugas 1 menit tetap cepat):
 - Mekanisme: Backoff eksponensial (1m, 2m, 4m, 8m, 16m, 32m, hingga maksimal jeda 60m).
 - Batas percobaan: Maksimal 8 kali per to-do.
 - Tugas yang mencapai 8 kali percobaan gagal akan ditandai pada halaman `/status` sebagai **MACET** dan membutuhkan pengecekan kuota Google API atau koneksi akun.
+
+### 4.3 Kunci Atomik Scheduler (`scheduler_locks`)
+Untuk mencegah eksekusi tumpang tindih jika siklus tick berjalan lebih dari 1 menit atau dipicu bersamaan, scheduler menerapkan penguncian atomik pada tabel `scheduler_locks`:
+- Masa sewa kunci adalah 55 detik.
+- Jika tick sebelumnya masih berjalan, eksekusi berikutnya akan dilewati secara aman (`TICK_OVERLAP`) tanpa menduplikasi pengiriman pesan atau alarm.
+- Jika proses tick mati mendadak, kunci yang basi otomatis diambil alih pada siklus berikutnya setelah masa sewa kedaluwarsa.
+
+### 4.4 Dead-Man Switch (`HEARTBEAT_URL`)
+Untuk memantau detak scheduler secara independen di luar server:
+1. Buat monitor push baru di **Uptime Kuma** (tipe: `Push`) atau **Healthchecks.io** dengan interval 1 menit dan batas toleransi (grace) 2 menit.
+2. Masukkan URL ping yang diberikan ke file `.env` pada variabel `HEARTBEAT_URL`:
+   ```bash
+   HEARTBEAT_URL="https://hc-ping.com/your-uuid-here"
+   ```
+3. Restart dashboard: `docker compose restart botseri-dashboard`.
+4. Setiap kali siklus `tick()` berhasil memproses tugas, dashboard akan memanggil `GET` ke URL tersebut. Jika scheduler terhenti lebih dari 2 menit, Uptime Kuma atau Healthchecks.io akan mengirimkan notifikasi darurat (misal via Telegram/Email) ke pengelola sistem.
 
 ---
 
@@ -211,6 +226,7 @@ COMMIT;
 ```
 
 ### 7.2 Pembersihan `system_events` (> 180 hari)
+Event `TICK_OK` dibersihkan secara otomatis oleh scheduler jika berusia lebih dari 48 jam (batch deletion bertahap maksimal 500 baris per eksekusi). Event `TICK_FAILED` dan peringatan operasional lainnya dipertahankan hingga 180 hari. Untuk pembersihan manual:
 ```sql
 -- 1. Hitung jumlah baris yang akan dihapus
 SELECT count(*) FROM system_events WHERE ts < now() - interval '180 days';
@@ -220,7 +236,6 @@ BEGIN;
 DELETE FROM system_events WHERE ts < now() - interval '180 days';
 COMMIT;
 ```
-
 ### 7.3 Pembersihan Permanen Pesanan Terhapus (Purge > 30 Hari)
 Pesanan yang dihapus oleh owner melalui tool atau dashboard masuk ke status soft-delete (`deleted_at IS NOT NULL`). Setelah melewati masa retensi 30 hari di kotak Sampah, pesanan dapat dibersihkan secara permanen:
 

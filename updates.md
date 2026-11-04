@@ -1554,3 +1554,42 @@ Menyatukan parsing waktu yang terfragmentasi ke dalam fasad tunggal kanonik `das
   DROP INDEX IF EXISTS "todos_status_reminded_at_reminder_expired_at_idx";
   ALTER TABLE "todos" DROP COLUMN IF EXISTS "reminder_expired_at";
   ```
+
+## [2026-11-04] S08: Reliabilitas Scheduler dan Observabilitas (P1)
+
+### 1. Ringkasan Perbaikan
+Menerapkan penguncian atomik level database pada tabel `scheduler_locks` dengan masa sewa 55 detik untuk mencegah eksekusi tick scheduler tumpang tindih (`TICK_OVERLAP`) tanpa menggunakan advisory lock pada connection pool. Mengganti ambang hardcode 30 menit menjadi variabel dinamis `SCHEDULER_STALE_MINUTES` (default 3 menit). Membatasi anggaran waktu eksekusi tick (Google Calendar timeout 20 detik) dan memisahkan retry Google sync serial hanya pada interval 5 menit. Menambahkan healthcheck container `botseri-n8n` di `docker-compose.yml`, verifikasi healthy di `smoke.sh`, integrasi dead-man switch eksternal via `HEARTBEAT_URL` (timeout 3 detik), pembersihan batch `pruneOldTickEvents` (maksimal 500 baris, retensi 48 jam), dan memperkaya halaman `/status` dengan 6 metrik observabilitas (Alarm 24 Jam, Circuit Breaker WAHA, LLM 429 Throttle, Sesi Menunggu, Versi Pipeline, dan Tick Overlap).
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan model `SchedulerLock` dan pemetaan ke tabel `scheduler_locks`. |
+| `dashboard/prisma/migrations/20261104180000_add_scheduler_locks/migration.sql` | Baru | Migrasi SQL forward-only pembuatan tabel `scheduler_locks`. |
+| `dashboard/src/lib/scheduler/tick.ts` | Modifikasi | Penguncian atomik `scheduler_locks`, batas waktu Calendar 20s via `Promise.withResolvers`, interval sync Google 5m, integrasi `HEARTBEAT_URL`, dan batch prune. |
+| `dashboard/src/app/api/internal/scheduler/tick/route.ts` | Modifikasi | Penanganan `TICK_OVERLAP` agar tidak mencatat `TICK_OK` saat eksekusi tumpang tindih dilewati. |
+| `dashboard/src/lib/analytics/helpers.ts` | Modifikasi | Implementasi `getSchedulerStaleMinutes` dan pembaruan `tickHealth` berbasis ambang dinamis. |
+| `dashboard/src/lib/waha/humanizer.ts` | Modifikasi | Ekspor fungsi `getWahaCircuitBreakerStatus` untuk observabilitas status pendinginan breaker WAHA. |
+| `dashboard/src/app/(app)/status/page.tsx` | Modifikasi | Penambahan banner stale dinamis dan 6 panel metrik baru (alarm 24h, breaker WAHA, LLM 429, sesi menunggu, versi pipeline, overlap). |
+| `docker-compose.yml` | Modifikasi | Penambahan blok `healthcheck` untuk service `botseri-n8n` menggunakan endpoint `/healthz`. |
+| `scripts/smoke.sh` | Modifikasi | Penambahan pemeriksaan status container `botseri-n8n` berstatus `healthy`. |
+| `docs/RUNBOOK.md` | Modifikasi | Sinkronisasi interval tick 1 menit, ambang `SCHEDULER_STALE_MINUTES`, arsitektur `scheduler_locks`, dan panduan dead-man switch. |
+| `dashboard/tests/unit/scheduler-reliability.test.ts` | Baru | Pengujian unit kunci atomik `TICK_OVERLAP`, pemulihan kunci basi, ambang stale dinamis, dan ketahanan dead-man switch `HEARTBEAT_URL`. |
+| `dashboard/tests/unit/analytics-helpers.test.ts` | Modifikasi | Penyelarasan pengujian unit `tickHealth` dengan ambang stale dinamis. |
+| `dashboard/tests/unit/time-resolve.test.ts` | Modifikasi | Penyelarasan urutan kueri mock `$queryRaw` dengan penguncian atomik scheduler. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S08. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 40 test file, **383 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+4. **Smoke Test:** `./scripts/smoke.sh` lulus bersih (11 pemeriksaan lulus, 0 kegagalan).
+5. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+6. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104180000_add_scheduler_locks` (pembuatan tabel `scheduler_locks`).
+- Rollback Migrasi:
+  ```sql
+  DROP TABLE IF EXISTS "scheduler_locks";
+  ```

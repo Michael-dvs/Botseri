@@ -2,7 +2,8 @@ import { prisma } from "@/lib/db";
 import { getGoogleRow } from "@/lib/google/oauth";
 import { formatLocalDate, formatLocalDateTime } from "@/lib/time";
 import { getSessionStatus } from "@/lib/waha/client";
-import { tickHealth, truncateMessage } from "@/lib/analytics/helpers";
+import { getSchedulerStaleMinutes, tickHealth, truncateMessage } from "@/lib/analytics/helpers";
+import { getWahaCircuitBreakerStatus } from "@/lib/waha/humanizer";
 
 export const dynamic = "force-dynamic";
 async function withTimeout<T>(
@@ -48,6 +49,9 @@ export default async function StatusPage() {
   const now = new Date();
 
   // Run all checks in parallel with explicit 3-second timeout and try/catch isolation
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 3600_000);
+
+  // Run all checks in parallel with explicit 3-second timeout and try/catch isolation
   const [
     dbStatus,
     wahaStatus,
@@ -57,6 +61,12 @@ export default async function StatusPage() {
     pendingSyncCount,
     stuckSyncCount,
     lastJobs,
+    alarmStats,
+    wahaBreaker,
+    llmThrottleCount,
+    waitingSessions,
+    pipelineRow,
+    tickOverlapCount,
   ] = await Promise.all([
     // 1. DB
     withTimeout(
@@ -135,15 +145,90 @@ export default async function StatusPage() {
       3000,
       [],
     ),
+    // 9. Alarm 24 Jam stats
+    withTimeout(
+      Promise.all([
+        prisma.todo.count({
+          where: { status: "PENDING", has_specific_time: true, reminded_at: null, reminder_expired_at: null },
+        }),
+        prisma.todo.count({
+          where: { reminded_at: { gte: twentyFourHoursAgo } },
+        }),
+        prisma.todo.count({
+          where: { reminder_expired_at: { gte: twentyFourHoursAgo } },
+        }),
+        prisma.todo.count({
+          where: { status: "PENDING", reminder_attempts: { gte: 5 } },
+        }),
+      ]).then(([pending, sent, expired, failed]) => ({ pending, sent, expired, failed })),
+      3000,
+      { pending: 0, sent: 0, expired: 0, failed: 0 },
+    ),
+    // 10. WAHA Breaker
+    withTimeout(
+      Promise.resolve(getWahaCircuitBreakerStatus(now)),
+      3000,
+      { status: "NORMAL" as const, cooldown_remaining_seconds: 0, consecutive_failures: 0 },
+    ),
+    // 11. LLM Throttle (HTTP 429) count (24h)
+    withTimeout(
+      prisma.systemEvent.count({
+        where: {
+          ts: { gte: twentyFourHoursAgo },
+          OR: [
+            { code: "LLM_RATE_LIMITED" },
+            { message: { contains: "429" } },
+          ],
+        },
+      }),
+      3000,
+      0,
+    ),
+    // 12. Sesi Pelanggan Menunggu
+    withTimeout(
+      prisma.customerSession.findMany({
+        where: {
+          OR: [
+            { state: "PAUSED_FOR_OWNER" },
+            { paused_at: { not: null } },
+          ],
+        },
+        select: { paused_at: true, metadata: true, phone_e164: true },
+        take: 50,
+      }),
+      3000,
+      [],
+    ),
+    // 13. Pipeline Version
+    withTimeout(
+      prisma.pipelineConfig.findUnique({
+        where: { id: 1 },
+        select: { version: true },
+      }),
+      3000,
+      null,
+    ),
+    // 14. Tick Overlap (24h)
+    withTimeout(
+      prisma.systemEvent.count({
+        where: {
+          source: "SCHEDULER",
+          code: "TICK_OVERLAP",
+          ts: { gte: twentyFourHoursAgo },
+        },
+      }),
+      3000,
+      0,
+    ),
   ]);
 
-  const tickCondition = tickHealth(now, lastTickEvent?.ts);
+  const staleMinutes = getSchedulerStaleMinutes();
+  const tickCondition = tickHealth(now, lastTickEvent?.ts, staleMinutes);
   const tickAgeMinutes = lastTickEvent
     ? Math.max(0, Math.floor((now.getTime() - lastTickEvent.ts.getTime()) / 60_000))
     : null;
 
   const isTickAmber = tickCondition !== "OK";
-
   const googleStatus = googleRow?.status ?? "DISCONNECTED";
 
   return (
@@ -168,12 +253,13 @@ export default async function StatusPage() {
           <div>
             <p className="font-semibold">Peringatan: Detak Scheduler Tidak Segar</p>
             <p className="mt-0.5 text-xs text-[var(--warning)]">
-              Detak scheduler terakhir lebih dari 30 menit atau belum pernah tercatat. Periksa container botseri-n8n dan log scheduler.
+              {tickCondition === "NEVER"
+                ? "Detak scheduler belum pernah tercatat. Periksa kontainer botseri-n8n dan log scheduler."
+                : `Detak scheduler tertunda lebih dari ${staleMinutes} menit. Periksa kontainer n8n dan log scheduler.`}
             </p>
           </div>
         </div>
       ) : null}
-
       {/* Grid Status Komponen */}
       <section aria-labelledby="components-heading">
         <h2 id="components-heading" className="sr-only">
@@ -325,6 +411,124 @@ export default async function StatusPage() {
               {stuckSyncCount > 0
                 ? `${stuckSyncCount} tugas mencapai batas 8 percobaan (butuh intervensi).`
                 : "Semua antrean sinkronisasi dalam batas wajar."}
+            </p>
+          </div>
+
+          {/* Alarm Tugas 24 Jam */}
+          <div className="panel p-4">
+            <div className="flex items-center justify-between">
+              <p className="eyebrow">Alarm Tugas (24 Jam)</p>
+              {alarmStats.expired > 0 ? (
+                <span className="badge border border-[var(--danger)] bg-[var(--danger-soft)] text-[var(--danger)] font-medium">
+                  {alarmStats.expired} KEDALUWARSA
+                </span>
+              ) : (
+                <span className="badge badge-success">LANCAR</span>
+              )}
+            </div>
+            <p className="mt-2 text-xl font-semibold font-mono">
+              {alarmStats.sent} terkirim · {alarmStats.pending} aktif
+            </p>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              {alarmStats.expired > 0
+                ? `${alarmStats.expired} alarm terlewat > 12 jam (ditampilkan di brief).`
+                : "Tidak ada alarm yang terlewat > 12 jam."}
+            </p>
+          </div>
+
+          {/* Circuit Breaker WAHA */}
+          <div className="panel p-4">
+            <div className="flex items-center justify-between">
+              <p className="eyebrow">Circuit Breaker WAHA</p>
+              {wahaBreaker.status === "NORMAL" ? (
+                <span className="badge badge-success">NORMAL</span>
+              ) : (
+                <span className="badge border border-[var(--danger)] bg-[var(--danger-soft)] text-[var(--danger)] font-medium">
+                  COOLDOWN ({wahaBreaker.cooldown_remaining_seconds}s)
+                </span>
+              )}
+            </div>
+            <p className="mt-2 text-xl font-semibold">
+              {wahaBreaker.status === "NORMAL" ? (
+                <span className="text-[var(--success)]">Lancar</span>
+              ) : (
+                <span className="text-[var(--danger)]">Sedang Dibatasi</span>
+              )}
+            </p>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              {wahaBreaker.consecutive_failures > 0
+                ? `${wahaBreaker.consecutive_failures} kegagalan beruntun tercatat.`
+                : "0 kegagalan beruntun."}
+            </p>
+          </div>
+
+          {/* LLM Throttle 429 */}
+          <div className="panel p-4">
+            <div className="flex items-center justify-between">
+              <p className="eyebrow">LLM Throttle (429)</p>
+              {llmThrottleCount > 0 ? (
+                <span className="badge badge-warning">{llmThrottleCount} TERHAMBAT</span>
+              ) : (
+                <span className="badge badge-success">0 ERROR</span>
+              )}
+            </div>
+            <p className="mt-2 text-xl font-semibold font-mono">
+              {llmThrottleCount} kejadian
+            </p>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              Total error HTTP 429 rate limit dalam 24 jam terakhir.
+            </p>
+          </div>
+
+          {/* Sesi Pelanggan Menunggu */}
+          <div className="panel p-4">
+            <div className="flex items-center justify-between">
+              <p className="eyebrow">Sesi Pelanggan Menunggu</p>
+              {waitingSessions.length > 0 ? (
+                <span className="badge badge-warning">{waitingSessions.length} MENUNGGU</span>
+              ) : (
+                <span className="badge badge-success">NIHIL</span>
+              )}
+            </div>
+            <p className="mt-2 text-xl font-semibold font-mono">
+              {waitingSessions.length} sesi
+            </p>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              {waitingSessions.length > 0
+                ? `Menunggu respons manual owner WhatsApp.`
+                : "Tidak ada sesi pelanggan yang dibisukan."}
+            </p>
+          </div>
+
+          {/* Versi Pipeline */}
+          <div className="panel p-4">
+            <div className="flex items-center justify-between">
+              <p className="eyebrow">Versi Pipeline</p>
+              <span className="badge badge-success">v{pipelineRow?.version ?? 1}</span>
+            </div>
+            <p className="mt-2 text-xl font-semibold font-mono">
+              Versi {pipelineRow?.version ?? 1}
+            </p>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              Graf alur kerja visual aktif di runtime (SSOT).
+            </p>
+          </div>
+
+          {/* Tick Overlap */}
+          <div className="panel p-4">
+            <div className="flex items-center justify-between">
+              <p className="eyebrow">Tick Overlap (24 Jam)</p>
+              {tickOverlapCount > 0 ? (
+                <span className="badge badge-warning">{tickOverlapCount} OVERLAP</span>
+              ) : (
+                <span className="badge badge-success">0 OVERLAP</span>
+              )}
+            </div>
+            <p className="mt-2 text-xl font-semibold font-mono">
+              {tickOverlapCount} dicegah
+            </p>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              Pencegahan tumpang tindih eksekusi via scheduler_locks.
             </p>
           </div>
         </div>

@@ -413,3 +413,11 @@ model PendingConfirmation {
   @@index([owner_chat_id, executed_at, expires_at])
   @@map("pending_confirmations")
 }
+
+model SchedulerLock {
+  name         String   @id @db.VarChar(50)
+  locked_until DateTime @db.Timestamptz()
+  holder       String   @db.VarChar(100)
+
+  @@map("scheduler_locks")
+}

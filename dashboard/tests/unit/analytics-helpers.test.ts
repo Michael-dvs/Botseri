@@ -114,24 +114,24 @@ describe("tickHealth", () => {
     expect(tickHealth(base, undefined)).toBe("NEVER");
   });
 
-  it("mengembalikan OK jika umur detak tepat 30 menit", () => {
-    const thirtyMinutesLater = new Date("2026-10-27T10:30:00.000Z");
-    expect(tickHealth(thirtyMinutesLater, base)).toBe("OK");
+  it("mengembalikan OK jika umur detak tepat dalam ambang stale", () => {
+    const withinStale = new Date("2026-10-27T10:03:00.000Z");
+    expect(tickHealth(withinStale, base, 3)).toBe("OK");
   });
 
-  it("mengembalikan STALE jika umur detak melebihi 30 menit satu milidetik", () => {
-    const pastThirtyMinutes = new Date("2026-10-27T10:30:00.001Z");
-    expect(tickHealth(pastThirtyMinutes, base)).toBe("STALE");
+  it("mengembalikan STALE jika umur detak melebihi ambang stale satu milidetik", () => {
+    const pastStale = new Date("2026-10-27T10:03:00.001Z");
+    expect(tickHealth(pastStale, base, 3)).toBe("STALE");
   });
 
-  it("mengembalikan OK jika umur detak di bawah 30 menit", () => {
-    const fiveMinutesLater = new Date("2026-10-27T10:05:00.000Z");
-    expect(tickHealth(fiveMinutesLater, base)).toBe("OK");
+  it("mengembalikan OK jika umur detak di bawah ambang stale", () => {
+    const oneMinuteLater = new Date("2026-10-27T10:01:00.000Z");
+    expect(tickHealth(oneMinuteLater, base, 3)).toBe("OK");
   });
 
-  it("mengembalikan STALE untuk detak yang terlewat 45 menit", () => {
-    const fortyFiveMinutesLater = new Date("2026-10-27T10:45:00.000Z");
-    expect(tickHealth(fortyFiveMinutesLater, base)).toBe("STALE");
+  it("mengembalikan STALE untuk detak yang terlewat jauh dari ambang", () => {
+    const tenMinutesLater = new Date("2026-10-27T10:10:00.000Z");
+    expect(tickHealth(tenMinutesLater, base, 3)).toBe("STALE");
   });
 });
 

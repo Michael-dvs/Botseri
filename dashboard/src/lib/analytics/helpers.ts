@@ -78,16 +78,23 @@ export function safeDecimal(val: unknown): number {
   return Number(val);
 }
 
-const THIRTY_MINUTES_MS = 30 * 60 * 1000;
+export function getSchedulerStaleMinutes(): number {
+  const envVal = Number(process.env.SCHEDULER_STALE_MINUTES);
+  if (Number.isFinite(envVal) && envVal > 0) {
+    return Math.floor(envVal);
+  }
+  return 3;
+}
 
 export function tickHealth(
   now: Date,
   lastTickAt: Date | null | undefined,
+  staleMinutes: number = getSchedulerStaleMinutes(),
 ): "OK" | "STALE" | "NEVER" {
   if (!lastTickAt) return "NEVER";
   const diff = now.getTime() - lastTickAt.getTime();
   if (diff < 0) return "OK";
-  if (diff <= THIRTY_MINUTES_MS) return "OK";
+  if (diff <= staleMinutes * 60 * 1000) return "OK";
   return "STALE";
 }
 

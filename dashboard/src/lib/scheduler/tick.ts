@@ -1,4 +1,4 @@
-import type { BotSettings, JobType } from "@prisma/client";
+import { Prisma, type BotSettings, type JobType } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { recordEvent } from "@/lib/events";
 import { listCalendarEventsToday, type CalendarEventSummary } from "@/lib/google/calendar";
@@ -43,6 +43,11 @@ export type SchedulerJob = {
   todo_id?: string;
 };
 
+export type TickResult = {
+  now_local: string;
+  jobs: SchedulerJob[];
+  skipped?: "TICK_OVERLAP";
+};
 type ClaimedRow = { id: string; attempts: number };
 
 type FallbackBriefInput = {
@@ -220,7 +225,13 @@ async function buildBrief(
   const expiredAlarms = expiredRows.map((r) => r.title);
   let events: CalendarEventSummary[] = [];
   try {
-    events = await listCalendarEventsToday(settings.timezone);
+    const { promise: calendarTimeout, reject } = Promise.withResolvers<CalendarEventSummary[]>();
+    const t = setTimeout(() => reject(new Error("Google Calendar timeout (20s)")), 20_000);
+    if (typeof t.unref === "function") t.unref();
+    events = await Promise.race([
+      listCalendarEventsToday(settings.timezone),
+      calendarTimeout,
+    ]);
   } catch (error) {
     await recordEvent("WARN", "SCHEDULER", "GOOGLE_CALENDAR_READ_FAILED", {
       error: error instanceof Error ? error.message.slice(0, 500) : "unknown",
@@ -407,13 +418,23 @@ async function warnShortWindows(settings: BotSettings, now: Date): Promise<void>
 
 async function pruneOldTickEvents(now: Date): Promise<void> {
   const twoDaysAgo = new Date(now.getTime() - 48 * 60 * 60_000);
-  await prisma.systemEvent.deleteMany({
+  const staleEventIds = await prisma.systemEvent.findMany({
     where: {
       source: "SCHEDULER",
       code: "TICK_OK",
       ts: { lt: twoDaysAgo },
     },
+    select: { id: true },
+    take: 500,
   });
+
+  if (staleEventIds.length > 0) {
+    await prisma.systemEvent.deleteMany({
+      where: {
+        id: { in: staleEventIds.map((e) => e.id) },
+      },
+    });
+  }
 }
 
 
@@ -492,26 +513,54 @@ export async function buildOwnerDigestJob(
     skip_llm: true,
   };
 }
-export async function tick(now: Date = new Date()): Promise<{ now_local: string; jobs: SchedulerJob[] }> {
+export async function tick(
+  now: Date = new Date(),
+  holder?: string,
+): Promise<TickResult> {
   const settings = await prisma.botSettings.findUnique({ where: { id: 1 } });
   const timezone = settings?.timezone ?? "Asia/Jakarta";
   const nowLocal = localIsoString(now, timezone);
   if (!settings || !settings.bot_enabled || !settings.setup_completed) return { now_local: nowLocal, jobs: [] };
 
-  const today = localDateString(now, timezone);
-  await isolatedHousekeeping("normalizeOverduePlannedDates", () => normalizeOverduePlannedDates(today));
-  await isolatedHousekeeping("recoverStaleClaims", () => recoverStaleClaims(now));
-  await isolatedHousekeeping("recoverStaleTaskClaims", async () => {
-    await recoverStaleTaskClaims(now);
-  });
-  await isolatedHousekeeping("processExpiredAlarms", async () => {
-    await processExpiredAlarms(now);
-  });
-  await isolatedHousekeeping("retryPendingGoogleSync", () => retryPendingGoogleSync(20));
-  await isolatedHousekeeping("checkWahaSession", () => checkWahaSession(now));
-  await isolatedHousekeeping("warnShortWindows", () => warnShortWindows(settings, now));
-  await isolatedHousekeeping("pruneOldTickEvents", () => pruneOldTickEvents(now));
+  // 1. Guard Kunci Atomik (TICK_OVERLAP)
+  const lockHolder = holder ?? `tick_${now.getTime()}_${Math.random().toString(36).slice(2, 8)}`;
+  const lockUntil = new Date(now.getTime() + 55_000);
 
+  const acquired = await prisma.$queryRaw<Array<{ name: string }>>(Prisma.sql`
+    INSERT INTO scheduler_locks (name, locked_until, holder)
+    VALUES ('tick', ${lockUntil}, ${lockHolder})
+    ON CONFLICT (name) DO UPDATE
+    SET locked_until = ${lockUntil},
+        holder = ${lockHolder}
+    WHERE scheduler_locks.locked_until < ${now}
+    RETURNING name;
+  `);
+
+  if (!acquired || acquired.length === 0) {
+    await recordEvent("INFO", "SCHEDULER", "TICK_OVERLAP", {
+      reason: "Tick sebelumnya masih berjalan.",
+      holder: lockHolder,
+    });
+    return { now_local: nowLocal, jobs: [], skipped: "TICK_OVERLAP" };
+  }
+
+  try {
+    const today = localDateString(now, timezone);
+    await isolatedHousekeeping("normalizeOverduePlannedDates", () => normalizeOverduePlannedDates(today));
+    await isolatedHousekeeping("recoverStaleClaims", () => recoverStaleClaims(now));
+    await isolatedHousekeeping("recoverStaleTaskClaims", async () => {
+      await recoverStaleTaskClaims(now);
+    });
+    await isolatedHousekeeping("processExpiredAlarms", async () => {
+      await processExpiredAlarms(now);
+    });
+    // Jalankan retry sync Google hanya setiap 5 menit agar tick 1 menit tetap cepat untuk TASK_ALARM
+    if (now.getMinutes() % 5 === 0) {
+      await isolatedHousekeeping("retryPendingGoogleSync", () => retryPendingGoogleSync(20));
+    }
+    await isolatedHousekeeping("checkWahaSession", () => checkWahaSession(now));
+    await isolatedHousekeeping("warnShortWindows", () => warnShortWindows(settings, now));
+    await isolatedHousekeeping("pruneOldTickEvents", () => pruneOldTickEvents(now));
   const owner = await getPrimaryOwner();
   if (!owner) {
     if (!await hourlyEventExists("SCHEDULER_NO_OWNER", now)) {
@@ -623,5 +672,30 @@ export async function tick(now: Date = new Date()): Promise<{ now_local: string;
     await markMissedJob(today, "END_OF_DAY_EVAL", 0);
   }
 
-  return { now_local: nowLocal, jobs };
+    // Dead-Man Switch (HEARTBEAT_URL)
+    const heartbeatUrl = process.env.HEARTBEAT_URL;
+    if (heartbeatUrl) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        await fetch(heartbeatUrl, { method: "GET", signal: controller.signal });
+        clearTimeout(timeout);
+      } catch (hbErr) {
+        // Gagal heartbeat DILARANG menggagalkan alur utama tick
+        console.error("Heartbeat request failed (non-fatal):", hbErr);
+      }
+    }
+
+    return { now_local: nowLocal, jobs };
+  } finally {
+    try {
+      await prisma.$executeRaw(Prisma.sql`
+        UPDATE scheduler_locks
+        SET locked_until = ${now}
+        WHERE name = 'tick' AND holder = ${lockHolder};
+      `);
+    } catch {
+      // Abaikan error saat pelepasan kunci
+    }
+  }
 }

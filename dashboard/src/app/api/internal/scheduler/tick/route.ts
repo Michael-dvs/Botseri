@@ -11,7 +11,9 @@ export async function POST(request: Request) {
 
   try {
     const result = await tick(new Date());
-    await recordEvent("INFO", "SCHEDULER", "TICK_OK", { jobs: result.jobs.length });
+    if (result.skipped !== "TICK_OVERLAP") {
+      await recordEvent("INFO", "SCHEDULER", "TICK_OK", { jobs: result.jobs.length });
+    }
     return NextResponse.json(result);
   } catch (error) {
     await recordEvent("ERROR", "SCHEDULER", "TICK_FAILED", {

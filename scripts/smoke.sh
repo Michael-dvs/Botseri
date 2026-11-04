@@ -95,6 +95,22 @@ else
   check "INV-01: Container botseri-n8n TIDAK memiliki DATABASE_URL" 0 "dilewati: container tidak aktif di host ini"
 fi
 
+# 5b. Healthcheck: container botseri-n8n berstatus healthy
+N8N_HEALTHY_OK=1
+if command -v docker >/dev/null 2>&1 && docker compose ps --status running --services 2>/dev/null | grep -q "botseri-n8n"; then
+  N8N_HEALTH_STATUS="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' botseri-n8n 2>/dev/null || echo "none")"
+  if [ "$N8N_HEALTH_STATUS" = "healthy" ]; then
+    N8N_HEALTHY_OK=0
+    check "Healthcheck: container botseri-n8n berstatus healthy" "$N8N_HEALTHY_OK" "status: $N8N_HEALTH_STATUS"
+  elif [ "$N8N_HEALTH_STATUS" = "none" ] || [ -z "$N8N_HEALTH_STATUS" ]; then
+    check "Healthcheck: container botseri-n8n berstatus healthy" 0 "dilewati: container belum di-recreate dengan healthcheck baru (jalankan docker compose up -d botseri-n8n)"
+  else
+    check "Healthcheck: container botseri-n8n berstatus healthy" "$N8N_HEALTHY_OK" "status: $N8N_HEALTH_STATUS"
+  fi
+else
+  check "Healthcheck: container botseri-n8n berstatus healthy" 0 "dilewati: container tidak aktif di host ini"
+fi
+
 # 6. Migrasi Prisma selesai (_prisma_migrations tidak ada yang gagal/tertunda)
 MIGRATIONS_OK=1
 if command -v docker >/dev/null 2>&1 && docker compose ps --status running --services 2>/dev/null | grep -q "botseri-db"; then

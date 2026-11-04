@@ -38,6 +38,21 @@ const sentTimestamps: number[] = [];
 let consecutiveFailures = 0;
 let cooldownUntil = 0;
 
+export function getWahaCircuitBreakerStatus(now: Date = new Date()): {
+  status: "NORMAL" | "COOLDOWN";
+  cooldown_remaining_seconds: number;
+  consecutive_failures: number;
+} {
+  const isCooldown = cooldownUntil > now.getTime();
+  const remainingSeconds = isCooldown
+    ? Math.max(0, Math.ceil((cooldownUntil - now.getTime()) / 1000))
+    : 0;
+  return {
+    status: isCooldown ? "COOLDOWN" : "NORMAL",
+    cooldown_remaining_seconds: remainingSeconds,
+    consecutive_failures: consecutiveFailures,
+  };
+}
 export function calculateTypingDuration(
   text: string,
   randomFn = Math.random,

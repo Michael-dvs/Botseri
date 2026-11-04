@@ -313,8 +313,12 @@ describe("S07: Waktu dan Alarm Server sebagai Penentu (P1)", () => {
         reminder_attempts: 1,
       };
 
-      prismaMock.$queryRaw.mockResolvedValueOnce([alarmRow]); // Panggilan pertama claim 1 alarm
-      prismaMock.$queryRaw.mockResolvedValueOnce([]); // Panggilan kedua claim 0 alarm (sudah diklaim / skip locked)
+      // Tick 1: dapat lock, klaim 1 alarm
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ name: "tick" }]); // lock
+      prismaMock.$queryRaw.mockResolvedValueOnce([alarmRow]); // alarms
+      // Tick 2: dapat lock, klaim 0 alarm (sudah diklaim / skip locked)
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ name: "tick" }]); // lock
+      prismaMock.$queryRaw.mockResolvedValueOnce([]); // alarms
 
       const tick1 = await tick(baseNow);
       expect(tick1.jobs.filter((j) => j.job_type === "TASK_ALARM").length).toBe(1);
