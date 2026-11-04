@@ -4,6 +4,7 @@ import { formatLocalDate, formatLocalDateTime } from "@/lib/time";
 import { getSessionStatus } from "@/lib/waha/client";
 import { getSchedulerStaleMinutes, tickHealth, truncateMessage } from "@/lib/analytics/helpers";
 import { getWahaCircuitBreakerStatus } from "@/lib/waha/humanizer";
+import { ResetGuardButton } from "./ResetGuardButton";
 
 export const dynamic = "force-dynamic";
 async function withTimeout<T>(
@@ -242,7 +243,7 @@ export default async function StatusPage() {
       </header>
 
       {/* Amber banner when scheduler tick is stale or never run (R-25, R-27) */}
-      {isTickAmber ? (
+      {isTickAmber && (
         <div
           role="alert"
           className="flex items-start gap-3 rounded border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-sm text-[var(--warning)]"
@@ -259,7 +260,17 @@ export default async function StatusPage() {
             </p>
           </div>
         </div>
-      ) : null}
+      )}
+
+      {/* High-contrast banner for fast test or mock outbound mode */}
+      {(process.env.WAHA_FAST_TEST === "1" || process.env.WAHA_MOCK_OUTBOUND === "1") && (
+        <div
+          role="alert"
+          className="rounded border-2 border-red-600 bg-red-100 p-4 text-xs font-bold text-red-900"
+        >
+          [!] PERINGATAN OPERASIONAL: Mode bypass pengujian aktif (WAHA_FAST_TEST={process.env.WAHA_FAST_TEST || "0"}, WAHA_MOCK_OUTBOUND={process.env.WAHA_MOCK_OUTBOUND || "0"}). Pesan WhatsApp keluar tidak dikirimkan secara normal atau jeda waktu dinonaktifkan!
+        </div>
+      )}
       {/* Grid Status Komponen */}
       <section aria-labelledby="components-heading">
         <h2 id="components-heading" className="sr-only">
@@ -440,13 +451,16 @@ export default async function StatusPage() {
           <div className="panel p-4">
             <div className="flex items-center justify-between">
               <p className="eyebrow">Circuit Breaker WAHA</p>
-              {wahaBreaker.status === "NORMAL" ? (
-                <span className="badge badge-success">NORMAL</span>
-              ) : (
-                <span className="badge border border-[var(--danger)] bg-[var(--danger-soft)] text-[var(--danger)] font-medium">
-                  COOLDOWN ({wahaBreaker.cooldown_remaining_seconds}s)
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                {wahaBreaker.status === "NORMAL" ? (
+                  <span className="badge badge-success">NORMAL</span>
+                ) : (
+                  <span className="badge border border-[var(--danger)] bg-[var(--danger-soft)] text-[var(--danger)] font-medium">
+                    COOLDOWN ({wahaBreaker.cooldown_remaining_seconds}s)
+                  </span>
+                )}
+                <ResetGuardButton isCooldown={wahaBreaker.status === "COOLDOWN"} />
+              </div>
             </div>
             <p className="mt-2 text-xl font-semibold">
               {wahaBreaker.status === "NORMAL" ? (

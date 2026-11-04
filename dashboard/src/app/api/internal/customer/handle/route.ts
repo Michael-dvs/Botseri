@@ -178,6 +178,37 @@ export async function POST(request: Request) {
         replies: [],
       });
     }
+    // Debounce Pelanggan pada AWAITING_ORDER: jika pesan kedua datang dalam jeda < 2 detik,
+    // gabungkan teks ke dalam draft dan tekan balasan ganda bot
+    const lastMsgTime = session.last_message_at ? new Date(session.last_message_at).getTime() : 0;
+    const isRapidFollowUp = (Date.now() - lastMsgTime < 2000) && session.state === "AWAITING_ORDER";
+    if (isRapidFollowUp) {
+      const currentDraft = (meta.draft as Record<string, unknown>) || {};
+      const parsedNew = parseOrderForm(message_text);
+      const mergedDraft = { ...currentDraft, ...parsedNew.fields };
+
+      const updatedMetadata: Prisma.InputJsonValue = {
+        ...meta,
+        draft: mergedDraft,
+        last_message_id: message_id || (meta.last_message_id as string | null) || null,
+      };
+
+      await prisma.customerSession.updateMany({
+        where: { id: session.id },
+        data: {
+          last_message_at: new Date(),
+          metadata: updatedMetadata,
+        },
+      });
+
+      return NextResponse.json({
+        ok: true,
+        state_before: stateBefore,
+        state_after: stateBefore,
+        replies: [],
+      });
+    }
+
 
     // 2. Calculate pausedExpired (D6)
     const ttlHours = parseFloat(process.env.CUSTOMER_PAUSE_TTL_HOURS || "24");
@@ -837,20 +868,32 @@ export async function POST(request: Request) {
               const alertTemplate = (confirmConf.enabled && confirmConf.owner_new_order_alert_template)
                 ? confirmConf.owner_new_order_alert_template
                 : null;
-              const alertBody = alertTemplate
-                ? renderPipelineTemplate(alertTemplate, {
-                    order_id: shortId,
-                    customer_name: createdOrder.customer_name,
-                    customer_phone: customer_phone,
-                    service_type: createdOrder.description,
-                    event_date: formattedDate,
-                    delivery_time: draftMerged.jam_pengiriman || "-",
-                    delivery_address: createdOrder.delivery_address || "-",
-                    special_notes: draftMerged.request_khusus || "-",
-                    payment_status: createdOrder.payment_status,
-                  })
-                : `🔔 *Pesanan Baru Masuk!* 🌸✨\n\n• Pemesan: *${createdOrder.customer_name}* (${customer_phone})\n• Layanan: ${createdOrder.description}\n• Tanggal Acara: ${formattedDate}${draftMerged.jam_pengiriman ? ` · ${draftMerged.jam_pengiriman}` : ""}\n• Lokasi: ${createdOrder.delivery_address || "-"}\n• Catatan: ${draftMerged.request_khusus || "-"}\n• Status: ${createdOrder.payment_status}\n\nPesanan sudah otomatis dicatat ke sistem.`;
-
+              // Debounce Alert Owner: Jika > 3 pesanan dalam 10 menit, tunda dan gabungkan menjadi ringkasan
+              const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+              const recentOrderCount =
+                typeof prisma.order?.count === "function"
+                  ? await prisma.order.count({
+                      where: { created_at: { gte: tenMinutesAgo } },
+                    })
+                  : 1;
+              let alertBody: string;
+              if (recentOrderCount > 3) {
+                alertBody = `🔔 *${recentOrderCount} pesanan baru masuk dalam 10 menit terakhir.*\n\nCek daftar pesanan lengkap di dashboard.`;
+              } else {
+                alertBody = alertTemplate
+                  ? renderPipelineTemplate(alertTemplate, {
+                      order_id: shortId,
+                      customer_name: createdOrder.customer_name,
+                      customer_phone: customer_phone,
+                      service_type: createdOrder.description,
+                      event_date: formattedDate,
+                      delivery_time: draftMerged.jam_pengiriman || "-",
+                      delivery_address: createdOrder.delivery_address || "-",
+                      special_notes: draftMerged.request_khusus || "-",
+                      payment_status: createdOrder.payment_status,
+                    })
+                  : `🔔 *Pesanan Baru Masuk!* 🌸✨\n\n• Pemesan: *${createdOrder.customer_name}* (${customer_phone})\n• Layanan: ${createdOrder.description}\n• Tanggal Acara: ${formattedDate}${draftMerged.jam_pengiriman ? ` · ${draftMerged.jam_pengiriman}` : ""}\n• Lokasi: ${createdOrder.delivery_address || "-"}\n• Catatan: ${draftMerged.request_khusus || "-"}\n• Status: ${createdOrder.payment_status}\n\nPesanan sudah otomatis dicatat ke sistem.`;
+              }
               replies.push({
                 to: ownerPhone,
                 phone_e164: ownerPhone,

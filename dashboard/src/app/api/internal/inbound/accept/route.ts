@@ -541,6 +541,43 @@ export async function POST(request: Request) {
   const customerSession = await prisma.customerSession.findUnique({
     where: { phone_e164: validCustomerPhone },
   });
+
+  // 5a. Pengecekan Blocklist Pelanggan (S09)
+  if (customerSession?.blocked_at) {
+    return response(false, "BLOCKED_CUSTOMER", null, targetChatId);
+  }
+
+  // 5b. Batas Masuk Maksimal 30 Pesan per Jam per Pengirim (S09)
+  const oneHourAgo = new Date(Date.now() - 3600_000);
+  const hourlyInboundCount = await prisma.messageLog.count({
+    where: {
+      direction: "INBOUND",
+      chat_id: targetChatId,
+      created_at: { gte: oneHourAgo },
+    },
+  });
+  if (hourlyInboundCount >= 30) {
+    try {
+      await prisma.messageLog.create({
+        data: {
+          direction: "INBOUND",
+          wa_message_id: input.wa_message_id,
+          chat_id: targetChatId,
+          body: input.body ?? "",
+        },
+      });
+    } catch {
+      // Abaikan jika pencatatan log gagal
+    }
+
+    await recordEvent("WARN", "inbound", "INBOUND_HOURLY_LIMIT", {
+      chat_id: targetChatId,
+      phone_e164: validCustomerPhone,
+      count: hourlyInboundCount,
+    });
+    return response(false, "INBOUND_HOURLY_LIMIT", null, targetChatId);
+  }
+
   const sessionMeta = customerSession?.metadata as Record<string, unknown> | null;
   if (sessionMeta?.last_message_id === input.wa_message_id) {
     return response(false, "DUPLICATE", null, targetChatId);

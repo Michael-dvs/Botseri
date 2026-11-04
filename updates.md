@@ -1593,3 +1593,46 @@ Menerapkan penguncian atomik level database pada tabel `scheduler_locks` dengan 
   ```sql
   DROP TABLE IF EXISTS "scheduler_locks";
   ```
+
+## [2026-11-04] S09: WAHA: Antrean Prioritas, Batas Pelanggan, dan Debounce (P1)
+
+### 1. Ringkasan Perbaikan
+Menerapkan antrean berbobot prioritas P0-P2 pada `humanizer.ts` (`TASK_ALARM`, `NEW_ORDER_ALERT`, `OWNER_DIGEST`, `PAIRING` sebagai P0 mendahului antrean) dengan pembersihan pesan basi (P2 TTL 120 detik mencatat `WAHA_QUEUE_EXPIRED`). Mengamankan kuota reservasi anti-kelaparan P0 (1 slot/menit dan 5 slot/jam eksklusif untuk P0). Menetapkan batas laju pelanggan (maksimal 12 pesan keluar/jam per pelanggan dan 30 pesan masuk/jam per pengirim), menambahkan kolom `blocked_at` pada `customer_sessions` serta endpoint `/api/customer/block` dan `/api/customer/unblock`. Menerapkan persistensi state Circuit Breaker dan lazy init rate limiter pada tabel `runtime_flags`, endpoint reset guard `POST /api/waha/guard/reset`, tombol reset guard di `/status`, debounce gelembung pesan formulir pelanggan (< 2 detik), penggabungan alert pesanan baru (> 3 dalam 10 menit), dan banner peringatan mode bypass testing di `/status`.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/waha/triggers.ts` | Modifikasi | Pendaftaran pemetaan prioritas trigger `TRIGGER_PRIORITY` dengan `PAIRING` sebagai prioritas P0. |
+| `dashboard/src/lib/waha/humanizer.ts` | Modifikasi | Antrean berbobot prioritas P0-P2, kuota reservasi P0, TTL guard P2 120s, persistensi breaker via `runtime_flags`, dan lazy init. |
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan kolom `customer_sessions.blocked_at` dan model `RuntimeFlag` (`runtime_flags`). |
+| `dashboard/prisma/migrations/20261104200000_add_runtime_flags_and_blocked_at/migration.sql` | Baru | Migrasi SQL forward-only penambahan kolom `blocked_at` dan tabel `runtime_flags`. |
+| `dashboard/src/app/api/waha/guard/reset/route.ts` | Baru | Endpoint reset guard circuit breaker WAHA terproteksi sesi dan validasi origin CSRF. |
+| `dashboard/src/app/api/customer/block/route.ts` | Baru | Endpoint pemblokiran nomor pelanggan (`blocked_at`). |
+| `dashboard/src/app/api/customer/unblock/route.ts` | Baru | Endpoint pembukaan blokir nomor pelanggan. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Pengecekan blocklist pelanggan dan batas maksimal 30 pesan masuk/jam per pengirim (`INBOUND_HOURLY_LIMIT`). |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Debounce pesan beruntun pelanggan (< 2 detik) pada status `AWAITING_ORDER` dan penggabungan alert owner jika > 3 pesanan dalam 10 menit. |
+| `dashboard/src/app/api/internal/waha/send/route.ts` | Modifikasi | Penerusan jenis trigger ke `sendHumanizedMessage` untuk evaluasi prioritas antrean. |
+| `dashboard/src/app/(app)/status/ResetGuardButton.tsx` | Baru | Komponen tombol Reset Guard dengan dialog konfirmasi keselamatan. |
+| `dashboard/src/app/(app)/status/page.tsx` | Modifikasi | Integrasi tombol Reset Guard dan banner peringatan kontras tinggi mode bypass pengujian. |
+| `dashboard/src/app/(app)/orders/OrderBoard.tsx` | Modifikasi | Aksi pemblokiran/buka blokir kontak pelanggan langsung dari tabel pesanan. |
+| `docs/RUNBOOK.md` | Modifikasi | Dokumentasi antrean prioritas, kuota reservasi P0, dan panduan kapan aman/dilarang mereset guard. |
+| `dashboard/tests/unit/waha-priority-guard.test.ts` | Baru | Pengujian unit antrean prioritas, reservasi kuota P0, TTL 120s, debounce chat pelanggan, persistensi breaker, dan endpoint reset guard. |
+| `dashboard/tests/unit/waha-humanizer.test.ts` | Modifikasi | Penyelarasan pengujian rate limiter dengan parameter trigger P0. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S09. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 41 test file, **389 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+4. **Smoke Test:** `./scripts/smoke.sh` lulus bersih (11 pemeriksaan lulus, 0 kegagalan).
+5. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+6. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104200000_add_runtime_flags_and_blocked_at` (penambahan kolom `customer_sessions.blocked_at` dan tabel `runtime_flags`).
+- Rollback Migrasi:
+  ```sql
+  DROP TABLE IF EXISTS "runtime_flags";
+  ALTER TABLE "customer_sessions" DROP COLUMN IF EXISTS "blocked_at";
+  ```

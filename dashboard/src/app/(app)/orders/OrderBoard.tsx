@@ -233,6 +233,33 @@ export function OrderBoard({
       setPending(null);
     }
   }
+  async function handleToggleBlockCustomer(phone: string) {
+    const action = window.prompt(
+      `Ketik "BLOKIR" untuk memblokir nomor ${phone}, atau "BUKA" untuk membuka blokir:`,
+      "BLOKIR"
+    );
+    if (!action) return;
+    const isBlock = action.trim().toUpperCase() === "BLOKIR";
+    const endpoint = isBlock ? "/api/customer/block" : "/api/customer/unblock";
+
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone_e164: phone }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setError(data.error || "Gagal memproses blokir.");
+      } else {
+        setMessage(data.message || "Aksi blokir berhasil.");
+        router.refresh();
+      }
+    } catch {
+      setError("Tidak dapat menghubungi server.");
+    }
+  }
+
 
 
   async function remove(order: OrderRow) {
@@ -500,9 +527,21 @@ export function OrderBoard({
                       <span className="cell-label">Pelanggan</span>
                       <div className="cell-value min-w-0">
                         <p className="font-medium text-stone-700">{order.customer_name}</p>
-                        <p className="mt-0.5 text-xs text-[var(--muted)]">
-                          {order.customer_contact ?? "Kontak belum diisi"}
-                        </p>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="text-xs text-[var(--muted)] truncate">
+                            {order.customer_contact ?? "Kontak belum diisi"}
+                          </span>
+                          {order.customer_contact && order.customer_contact.replace(/\D/g, "").length >= 7 && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleBlockCustomer(order.customer_contact!)}
+                              className="text-[10px] text-stone-500 hover:text-red-600 underline cursor-pointer"
+                              title="Blokir atau Buka Blokir pesan WhatsApp dari nomor ini"
+                            >
+                              Blokir
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -582,9 +621,21 @@ export function OrderBoard({
                     <span className="cell-label">Pelanggan</span>
                     <div className="cell-value min-w-0">
                       <p className="font-medium">{order.customer_name}</p>
-                      <p className="mt-0.5 text-xs text-[var(--muted)]">
-                        {order.customer_contact ?? "Kontak belum diisi"}
-                      </p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span className="text-xs text-[var(--muted)] truncate">
+                          {order.customer_contact ?? "Kontak belum diisi"}
+                        </span>
+                        {order.customer_contact && order.customer_contact.replace(/\D/g, "").length >= 7 && (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleBlockCustomer(order.customer_contact!)}
+                            className="text-[10px] text-stone-500 hover:text-red-600 underline cursor-pointer"
+                            title="Blokir atau Buka Blokir pesan WhatsApp dari nomor ini"
+                          >
+                            Blokir
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
 

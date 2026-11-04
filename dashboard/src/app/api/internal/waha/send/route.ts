@@ -7,7 +7,7 @@ import { authorizeInternal } from "@/lib/internal/auth";
 import { log } from "@/lib/logger";
 import { HumanizerError, sendHumanizedMessage } from "@/lib/waha/humanizer";
 import { validateAgentOutput, FALLBACK_INVALID_REPLY } from "@/lib/waha/guard";
-import { OUTBOUND_TRIGGERS } from "@/lib/waha/triggers";
+import { OUTBOUND_TRIGGERS, type Trigger } from "@/lib/waha/triggers";
 const schema = z
   .object({
     phone_e164: z.string().trim().nullable().optional(),
@@ -175,6 +175,7 @@ export async function POST(request: Request) {
       text: textToSend,
       replyToWaMessageId: input.reply_to_wa_message_id,
       isPairing: input.trigger_type === "PAIRING" || input.trigger_type === "NEW_ORDER_ALERT",
+      trigger: input.trigger_type as Trigger,
       skipDelay,
     });
   } catch (error) {

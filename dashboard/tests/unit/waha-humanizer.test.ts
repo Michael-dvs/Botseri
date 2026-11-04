@@ -143,6 +143,7 @@ describe("WAHA Anti-Ban Humanizer (INV-13)", () => {
         const res = await sendHumanizedMessage({
           chatId,
           text: `Pesan nomor ${i}`,
+          trigger: "TASK_ALARM",
           skipDelay: true,
         });
         expect(res.ok).toBe(true);
@@ -153,6 +154,7 @@ describe("WAHA Anti-Ban Humanizer (INV-13)", () => {
         sendHumanizedMessage({
           chatId,
           text: "Pesan nomor 5 yang melanggar batas",
+          trigger: "TASK_ALARM",
           skipDelay: true,
         }),
       ).rejects.toThrowError(

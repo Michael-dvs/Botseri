@@ -239,6 +239,7 @@ model CustomerSession {
   customer_name   String?              @db.VarChar(255)
   state           CustomerSessionState @default(INIT)
   paused_at       DateTime?            @db.Timestamptz()
+  blocked_at      DateTime?            @db.Timestamptz()
   last_message_at DateTime             @default(now()) @db.Timestamptz()
   metadata        Json?
   created_at      DateTime             @default(now()) @db.Timestamptz()
@@ -420,4 +421,12 @@ model SchedulerLock {
   holder       String   @db.VarChar(100)
 
   @@map("scheduler_locks")
+}
+
+model RuntimeFlag {
+  key        String   @id @db.VarChar(100)
+  value_json Json     @db.JsonB
+  updated_at DateTime @updatedAt @db.Timestamptz()
+
+  @@map("runtime_flags")
 }
