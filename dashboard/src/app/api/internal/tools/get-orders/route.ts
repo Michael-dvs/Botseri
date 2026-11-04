@@ -7,7 +7,7 @@ import { OrderPaymentStatus, OrderStatus, type Order } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
 import { localDayUtcBounds } from "@/lib/time";
-
+import { sanitizeUntrusted, wrapCustomerText, type UntrustedCustomerText } from "@/lib/security/untrusted";
 export interface FormattedOrderSummary {
   order_id: string;
   customer_name: string;
@@ -21,6 +21,7 @@ export interface FormattedOrderSummary {
   status: string;
   payment_status: string;
   special_notes: string;
+  customer_text: UntrustedCustomerText;
 }
 
 function extractOrderDetails(notes: string | null) {
@@ -78,19 +79,22 @@ function formatOrder(order: Order, tz: string): FormattedOrderSummary {
   const opStatus = formatOperationalStatus(order.status);
   const payStatus = formatPaymentStatus(order.payment_status);
 
+  const customerTextObj = wrapCustomerText(special_notes);
+
   return {
     order_id: shortId,
-    customer_name: order.customer_name,
-    customer_contact: order.customer_contact || "-",
-    service_type: order.description,
+    customer_name: sanitizeUntrusted(order.customer_name, { maxLen: 150 }),
+    customer_contact: sanitizeUntrusted(order.customer_contact || "-", { maxLen: 50 }),
+    service_type: sanitizeUntrusted(order.description, { maxLen: 200 }),
     event_date: formattedDate,
     event_date_formatted: formattedDate,
-    delivery_time: finalDeliveryTime,
-    delivery_address: order.delivery_address || "-",
+    delivery_time: sanitizeUntrusted(finalDeliveryTime, { maxLen: 50 }),
+    delivery_address: sanitizeUntrusted(order.delivery_address || "-", { maxLen: 500 }),
     operational_status: opStatus,
     status: opStatus,
     payment_status: payStatus,
-    special_notes: special_notes,
+    special_notes: customerTextObj.text,
+    customer_text: customerTextObj,
   };
 }
 
@@ -114,6 +118,7 @@ async function handleGetOrders(request: Request) {
     prisma.order.findMany({
       where: {
         status: { in: activeOpStatuses },
+        deleted_at: null,
         event_date: {
           gte: todayStart,
           lt: todayEnd,
@@ -127,6 +132,7 @@ async function handleGetOrders(request: Request) {
     prisma.order.findMany({
       where: {
         status: { in: activeOpStatuses },
+        deleted_at: null,
         OR: [
           { event_date: { gte: todayEnd } },
           { event_date: null },

@@ -123,7 +123,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id || $json.reply_to_chat_id || $('Filter Event').item.json.payload.from, phone_e164: $json.phone_e164 || null, body: $json.reply_text, trigger_type: ($json.paired || $json.reason === 'PAIRED' || $json.reason === 'ALREADY_PAIRED') ? 'PAIRING' : 'CHAT_MASUK' }) }}",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id || $json.reply_to_chat_id || $('Filter Event').item.json.payload.from, phone_e164: $json.phone_e164 || null, body: $json.reply_text, trigger_type: $json.trigger_type || (($json.paired || $json.reason === 'PAIRED' || $json.reason === 'ALREADY_PAIRED') ? 'PAIRING' : 'CHAT_MASUK') }) }}",
         "options": {
           "timeout": 30000
         }

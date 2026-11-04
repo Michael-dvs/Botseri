@@ -1339,3 +1339,75 @@ Menerapkan fondasi kontrak sistem, enum tunggal trigger outbound, dan konsolidas
 ### 4. Migrasi & Rollback
 - Migrasi: Tidak ada migrasi database.
 - Rollback: `git revert <commit-s03>`
+
+---
+
+## [2026-11-04] S04: Keamanan Agen Owner: Injeksi Prompt dan Aksi Destruktif
+
+### 1. Ringkasan Perbaikan
+Menerapkan pengamanan menyeluruh terhadap ancaman Indirect Prompt Injection, aksi destruktif, dan manipulasi data massal (P0):
+1. **Pemisahan Data Tidak Tepercaya (`INV-14` & `lib/security/untrusted.ts`):**
+   - Membuat modul sanitasi `sanitizeUntrusted` yang menghapus karakter kontrol (ASCII 0-31 dan 127), karakter zero-width, menormalkan spasi, membatasi panjang (default 300), menetralkan triple backtick, dan menetralkan tag peran prompt injection (`<system>`, `[INST]`, `###`).
+   - Memisahkan data teks bebas pelanggan (`special_notes`/`request_khusus`) pada `get-orders` dan `get-prioritized-todos` ke dalam field `customer_text` dengan penanda eksplisit `untrusted: true`.
+   - Menambahkan aturan pagar pengaman `R-UNTRUSTED` pada prompt sistem `base.id.md`.
+2. **Konfirmasi Dua Langkah Deterministik (`INV-15` & Tabel `pending_confirmations`):**
+   - Menambahkan tabel `pending_confirmations` dengan indeks pada `(owner_chat_id, executed_at, expires_at)`.
+   - Pada `tool_update_order`, aksi `DELETE`, `CANCEL`, serta `ALL`/`SEMUA` (termasuk `MARK_COMPLETED` massal) tidak lagi mengeksekusi mutasi langsung di dalam tool.
+   - Membatasi eksekusi massal maksimum 50 pesanan aktif.
+   - Tiket konfirmasi dibuat berbatas waktu 5 menit (`expires_at`), mengembalikan `{ requires_confirmation: true, preview, instruksi_untuk_owner }`.
+   - Pada `inbound/accept/route.ts`, saat pesan owner baru cocok dengan kata persetujuan (`ya`, `oke`, dll.), aksi dieksekusi secara deterministik di sisi server tanpa memanggil LLM kembali, ditandai `executed_at = now()` secara idempoten, dan dibalas via trigger `CONFIRMATION_REPLY`.
+   - Pesan yang kedaluwarsa dilaporkan secara sopan, dan pesan lain dari owner secara otomatis membatalkan tiket konfirmasi tertunda.
+3. **Soft Delete & Pemulihan Pesanan:**
+   - Menambahkan kolom `orders.deleted_at` (`timestamptz null`) dengan indeks `orders_deleted_at_idx`.
+   - Mengubah aksi `DELETE` dan `CANCEL` menjadi soft delete (`status = CANCELLED`, `deleted_at = now()`) tanpa penghapusan fisik dari PostgreSQL (`0` panggilan `order.delete` di `dashboard/src`).
+   - Seluruh kueri pesanan aktif (`get-orders`, `get-prioritized-todos`, `api/orders`, mute bot) otomatis memfilter `deleted_at: null`.
+   - Menambahkan tampilan tab **"Sampah"** (< 30 hari) dan tombol **"Pulihkan"** pada antarmuka `/orders` (memulihkan `deleted_at: null` dan `status = PENDING`).
+   - Membuat skrip pembersihan permanen `scripts/purge-deleted-orders.ts` untuk pesanan terhapus > 30 hari.
+4. **Audit Mutasi & Ambiguitas ID:**
+   - Setiap mutasi pesanan dicatat ke `system_events` (`source: 'OWNER_TOOL'`, `code: 'ORDER_MUTATED'`).
+   - Menangani ambiguitas prefix `order_id`: bila prefix cocok ke > 1 pesanan, tool mengembalikan `ambiguous: true` beserta daftar kandidat tanpa mengeksekusi mutasi.
+   - Membuat skrip pembersih `scripts/clean-legacy-notes-status.ts` dan menghapus penambahan penanda lama `[STATUS: SELESAI]` pada `notes`.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `dashboard/src/lib/security/untrusted.ts` | Baru | Modul sanitasi karakter kontrol, zero-width, backtick, tag prompt role, dan wrapper `customer_text`. |
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan model `PendingConfirmation` dan kolom `Order.deleted_at`. |
+| `dashboard/prisma/migrations/20261104100000_add_pending_confirmations_and_order_soft_delete/migration.sql` | Baru | Migrasi SQL forward-only tabel `pending_confirmations` dan kolom `deleted_at`. |
+| `dashboard/src/app/api/internal/tools/update-order/route.ts` | Modifikasi | Penahanan konfirmasi 2 langkah (`DELETE`/`CANCEL`/`ALL`), batas massal 50, audit mutasi, dan cek ambiguitas prefix. |
+| `dashboard/src/app/api/internal/tools/get-orders/route.ts` | Modifikasi | Sanitasi seluruh field dan pembungkusan `customer_text` (`untrusted: true`). Filter `deleted_at: null`. |
+| `dashboard/src/app/api/internal/tools/get-prioritized-todos/route.ts` | Modifikasi | Sanitasi dan pembungkusan `customer_text`. Filter `deleted_at: null`. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Eksekusi deterministik konfirmasi dua langkah di server, proteksi self-confirmation, dan filter `deleted_at: null`. |
+| `dashboard/src/app/api/orders/[id]/route.ts` | Modifikasi | Soft delete pada `DELETE`, dukungan `restore: true` pada `PATCH`, dan auto-unmute pelanggan. |
+| `dashboard/src/app/api/orders/route.ts` | Modifikasi | Filter `deleted_at: null` pada daftar pesanan aktif. |
+| `dashboard/src/app/(app)/orders/page.tsx` | Modifikasi | Pembacaan data pesanan aktif dan pesanan sampah 30 hari terakhir. |
+| `dashboard/src/app/(app)/orders/OrderBoard.tsx` | Modifikasi | Penambahan tab "Sampah", aksi "Pulihkan", dan pencegahan konfirmasi fisik langsung. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Penambahan aturan `R-UNTRUSTED` pada pagar pengaman prompt sistem. |
+| `n8n-engine/workflows/botseri-inbound-agent.json` | Modifikasi | Penyelarasan pengiriman `trigger_type: CONFIRMATION_REPLY` pada balasan langsung. |
+| `dashboard/scripts/purge-deleted-orders.ts` & `scripts/purge-deleted-orders.ts` | Baru | Skrip pembersihan permanen pesanan terhapus > 30 hari. |
+| `dashboard/scripts/clean-legacy-notes-status.ts` & `scripts/clean-legacy-notes-status.ts` | Baru | Skrip pembersihan penanda lama `[STATUS: SELESAI]` pada `notes`. |
+| `docs/RUNBOOK.md` | Modifikasi | Dokumentasi sub-bagian 7.3 panduan menjalankan `purge-deleted-orders.ts`. |
+| `dashboard/tests/unit/s04-security.test.ts` | Baru | Pengujian unit sanitasi teks tidak tepercaya (`INV-14`). |
+| `dashboard/tests/unit/update-order-route.test.ts` | Modifikasi | Pengujian unit penahanan konfirmasi `DELETE`/`CANCEL`/`ALL`, batas 50, dan ambiguitas prefix. |
+| `dashboard/tests/unit/inbound-accept.test.ts` | Modifikasi | Pengujian integrasi eksekusi deterministik server, self-confirmation check, dan expired confirmation. |
+| `dashboard/tests/unit/api-orders-id-route.test.ts` | Modifikasi | Pengujian unit soft delete dan pemulihan `restore: true`. |
+| `dashboard/tests/unit/get-orders-route.test.ts` | Modifikasi | Pengujian unit sanitasi prompt injection pada `special_notes`. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S04. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 34 test file, **330 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+4. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+5. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+6. **Physical Delete Check:** `grep -RnE "order\.delete\(|DELETE FROM [\"']?orders[\"']?" dashboard/src` bersih (0 pemanggilan hapus fisik).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261104100000_add_pending_confirmations_and_order_soft_delete` (tabel `pending_confirmations`, kolom `orders.deleted_at`, indeks).
+- Rollback Migrasi:
+  ```sql
+  DROP TABLE IF EXISTS "pending_confirmations";
+  DROP INDEX IF EXISTS "orders_deleted_at_idx";
+  ALTER TABLE "orders" DROP COLUMN IF EXISTS "deleted_at";
+  ```

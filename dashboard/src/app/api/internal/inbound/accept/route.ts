@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { OrderStatus, Prisma, type MessageLog } from "@prisma/client";
+import { MessageLog, OrderPaymentStatus, OrderStatus, Prisma } from "@prisma/client";
 import { z } from "zod";
-import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
+import { prisma } from "@/lib/db";
 import { recordEvent } from "@/lib/events";
 import { PAIRING_PATTERN, pairingHash } from "@/lib/pairing";
 import { resolveSenderE164, isLidSender, getLidIdentifier } from "@/lib/phone";
@@ -39,14 +39,15 @@ const schema = z.object({
 function response(
   accept: boolean,
   reason: string,
-  messageId: string | null,
-  chatId: string,
+  messageId: string | null = null,
+  chatId: string | null = null,
   replyText: string | null = null,
   paired: boolean = false,
   phoneE164: string | null = null,
   role?: "OWNER" | "CUSTOMER",
   intent: "SUBMIT_ORDER" | null = null,
   customerPhone: string | null = null,
+  triggerType?: string,
 ) {
   return NextResponse.json({
     accept,
@@ -56,6 +57,7 @@ function response(
     chat_id: chatId,
     reply_to_chat_id: chatId,
     reply_text: replyText,
+    ...(triggerType ? { trigger_type: triggerType } : {}),
     ...(role ? { role } : {}),
     ...(customerPhone ? { customer_phone: customerPhone } : {}),
     ...(role === "CUSTOMER" ? { intent } : {}),
@@ -300,6 +302,181 @@ export async function POST(request: Request) {
       );
     }
 
+    // Invariant INV-15: Konfirmasi Dua Langkah Deterministik di Sisi Server untuk Owner
+    const now = new Date();
+    const pending = await prisma.pendingConfirmation.findFirst({
+      where: {
+        owner_chat_id: targetChatId,
+        executed_at: null,
+        expires_at: { gt: now },
+      },
+      orderBy: { created_at: "desc" },
+    });
+
+    const isNewMessage =
+      !pending ||
+      !pending.created_message_id ||
+      pending.created_message_id !== input.wa_message_id;
+    const trimmedBody = (input.body || "").trim();
+    const isConfirmWord = /^(ya|iya|y|ok|oke|lanjut|konfirmasi)[.! ]*$/i.test(trimmedBody);
+
+    if (pending && !isNewMessage) {
+      return response(
+        true,
+        "OK",
+        message.id,
+        targetChatId,
+        null,
+        false,
+        normalizedPhone,
+        "OWNER",
+      );
+    }
+
+    if (pending && isConfirmWord) {
+      const updated = await prisma.pendingConfirmation.updateMany({
+        where: { id: pending.id, executed_at: null },
+        data: { executed_at: now },
+      });
+
+      if (updated.count > 0) {
+        const payload = pending.payload_json as Record<string, unknown>;
+        let replyMsg = "";
+
+        if (pending.action === "DELETE" || pending.action === "CANCEL") {
+          const targetOrderId = payload.order_id as string;
+          const targetOrder = await prisma.order.findUnique({
+            where: { id: targetOrderId },
+          });
+
+          if (targetOrder) {
+            const shortId = `#ORD-${targetOrder.id.slice(0, 8).toUpperCase()}`;
+            await prisma.order.update({
+              where: { id: targetOrder.id },
+              data: {
+                status: OrderStatus.CANCELLED,
+                deleted_at: now,
+              },
+            });
+
+            if (targetOrder.customer_contact) {
+              const cleanPhone = targetOrder.customer_contact.trim();
+              await prisma.customerSession.updateMany({
+                where: {
+                  phone_e164: { in: [cleanPhone, `+${cleanPhone}`, cleanPhone.replace(/^\+/, "")] },
+                },
+                data: { state: "ACTIVE", paused_at: null },
+              });
+            }
+
+            await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
+              action: pending.action,
+              order_id: targetOrder.id,
+              source_message_id: input.wa_message_id,
+              affected_count: 1,
+            });
+
+            const actionWord = pending.action === "DELETE" ? "dihapus" : "dibatalkan";
+            replyMsg = `Pesanan ${shortId} (${targetOrder.customer_name}) berhasil ${actionWord}. Sesi pelanggan terkait telah dibuka kembali.`;
+          } else {
+            replyMsg = "Pesanan yang ingin dihapus/dibatalkan tidak ditemukan.";
+          }
+        } else if (pending.action === "BULK_COMPLETE") {
+          const orderIds = (payload.order_ids as string[]) || [];
+          const targetOrders = await prisma.order.findMany({
+            where: { id: { in: orderIds }, deleted_at: null },
+            select: { id: true, customer_contact: true },
+          });
+
+          if (targetOrders.length > 0) {
+            const updateData: {
+              status: OrderStatus;
+              completed_at: Date;
+              payment_status?: OrderPaymentStatus;
+            } = {
+              status: OrderStatus.COMPLETED,
+              completed_at: now,
+            };
+            if (payload.action === "COMPLETE_AND_PAY" || payload.action === "MARK_PAID") {
+              updateData.payment_status = OrderPaymentStatus.PAID;
+            }
+
+            await prisma.order.updateMany({
+              where: { id: { in: targetOrders.map((o) => o.id) } },
+              data: updateData,
+            });
+
+            for (const o of targetOrders) {
+              if (o.customer_contact) {
+                const cleanPhone = o.customer_contact.trim();
+                await prisma.customerSession.updateMany({
+                  where: {
+                    phone_e164: { in: [cleanPhone, `+${cleanPhone}`, cleanPhone.replace(/^\+/, "")] },
+                  },
+                  data: { state: "ACTIVE", paused_at: null },
+                });
+              }
+            }
+
+            await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
+              action: "BULK_COMPLETE",
+              source_message_id: input.wa_message_id,
+              affected_count: targetOrders.length,
+            });
+
+            replyMsg = `Sebanyak ${targetOrders.length} pesanan aktif berhasil ditandai selesai.`;
+          } else {
+            replyMsg = "Semua pesanan memang sudah berstatus selesai sebelumnya.";
+           }
+        }
+
+        return response(
+          true,
+          "CONFIRMED_ACTION_EXECUTED",
+          message.id,
+          targetChatId,
+          replyMsg,
+          false,
+          normalizedPhone,
+          "OWNER",
+          null,
+          null,
+          "CONFIRMATION_REPLY",
+        );
+      }
+    } else if (pending && !isConfirmWord) {
+      // Owner mengirim pesan lain apa pun: batalkan konfirmasi yang tertunda
+      await prisma.pendingConfirmation.updateMany({
+        where: { id: pending.id, executed_at: null },
+        data: { expires_at: new Date(0) },
+      });
+    } else {
+      // Cek apakah ada konfirmasi yang sudah kedaluwarsa saat owner membalas kata konfirmasi
+      const expiredPending = await prisma.pendingConfirmation.findFirst({
+        where: {
+          owner_chat_id: targetChatId,
+          executed_at: null,
+          expires_at: { lte: now },
+        },
+        orderBy: { created_at: "desc" },
+      });
+      if (expiredPending && isConfirmWord) {
+        return response(
+          true,
+          "CONFIRMATION_EXPIRED",
+          message.id,
+          targetChatId,
+          "Permintaan konfirmasi sebelumnya telah kedaluwarsa (lebih dari 5 menit). Silakan ulangi perintah jika masih diperlukan.",
+          false,
+          normalizedPhone,
+          "OWNER",
+          null,
+          null,
+          "CONFIRMATION_REPLY",
+        );
+      }
+    }
+
     return response(
       true,
       "OK",
@@ -311,7 +488,6 @@ export async function POST(request: Request) {
       "OWNER",
     );
   }
-
   // JALUR BUKAN WHITELIST (Customer & Manual Owner Message)
   // 2. Pesan fromMe = true pada chat non-whitelist (D1)
   if (input.from_me || input.fromMe === true) {
@@ -378,6 +554,7 @@ export async function POST(request: Request) {
   // 7. Bot Mute Policy & Auto-Heal: Periksa pesanan aktif pelanggan
   const activeOrder = await prisma.order.findFirst({
     where: {
+      deleted_at: null,
       OR: [
         { customer_contact: validCustomerPhone },
         { customer_contact: validCustomerPhone.replace(/^\+/, "") },

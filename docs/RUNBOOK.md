@@ -221,8 +221,21 @@ DELETE FROM system_events WHERE ts < now() - interval '180 days';
 COMMIT;
 ```
 
----
+### 7.3 Pembersihan Permanen Pesanan Terhapus (Purge > 30 Hari)
+Pesanan yang dihapus oleh owner melalui tool atau dashboard masuk ke status soft-delete (`deleted_at IS NOT NULL`). Setelah melewati masa retensi 30 hari di kotak Sampah, pesanan dapat dibersihkan secara permanen:
 
+> **PENTING:** Wajib jalankan `./scripts/backup.sh` terlebih dahulu sebelum melakukan pembersihan permanen!
+
+1. Jalankan simulasi pemeriksaan tanpa menghapus:
+   ```bash
+   npx tsx scripts/purge-deleted-orders.ts --dry-run
+   ```
+2. Jalankan eksekusi pembersihan permanen:
+   ```bash
+   npx tsx scripts/purge-deleted-orders.ts
+   ```
+
+---
 ## 8. Proteksi Cloudflare Tunnel dan Keamanan Jaringan
 
 ### 8.1 Aturan Ingress Tunnel

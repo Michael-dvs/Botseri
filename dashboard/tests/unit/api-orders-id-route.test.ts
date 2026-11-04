@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PATCH } from "@/app/api/orders/[id]/route";
+import { DELETE, PATCH } from "@/app/api/orders/[id]/route";
 import { OrderPaymentStatus, OrderStatus } from "@prisma/client";
 
 const {
@@ -114,5 +114,69 @@ describe("PATCH /api/orders/[id]", () => {
     const res = await PATCH(makeRequest({ status: "IN_PROGRESS" }), { params: { id: fakeId } });
     expect(res.status).toBe(200);
     expect(customerSessionUpdateManyMock).not.toHaveBeenCalled();
+  });
+
+  it("soft-deletes order on DELETE, sets deleted_at and CANCELLED, and un-mutes customer", async () => {
+    const existingOrder = {
+      id: fakeId,
+      customer_name: "Michael Aristyo",
+      customer_contact: "+628123456789",
+      status: OrderStatus.IN_PROGRESS,
+      deleted_at: null,
+    };
+
+    orderFindUniqueMock.mockResolvedValue(existingOrder);
+    orderUpdateMock.mockResolvedValue({
+      ...existingOrder,
+      status: OrderStatus.CANCELLED,
+      deleted_at: new Date(),
+    });
+
+    const req = new Request(`http://localhost:3000/api/orders/${fakeId}`, { method: "DELETE" });
+    const res = await DELETE(req, { params: { id: fakeId } });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(orderUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: fakeId },
+        data: expect.objectContaining({
+          status: "CANCELLED",
+          deleted_at: expect.any(Date),
+        }),
+      })
+    );
+    expect(customerSessionUpdateManyMock).toHaveBeenCalled();
+  });
+
+  it("restores soft-deleted order on PATCH with restore: true", async () => {
+    const existingOrder = {
+      id: fakeId,
+      customer_name: "Michael Aristyo",
+      customer_contact: "+628123456789",
+      status: OrderStatus.CANCELLED,
+      deleted_at: new Date(),
+    };
+
+    orderFindUniqueMock.mockResolvedValue(existingOrder);
+    orderUpdateMock.mockResolvedValue({
+      ...existingOrder,
+      deleted_at: null,
+      status: OrderStatus.PENDING,
+    });
+
+    const res = await PATCH(makeRequest({ restore: true }), { params: { id: fakeId } });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(orderUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: fakeId },
+        data: {
+          deleted_at: null,
+          status: "PENDING",
+        },
+      })
+    );
   });
 });

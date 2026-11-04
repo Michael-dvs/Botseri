@@ -31,6 +31,7 @@ function toResponse<
 
 export async function GET() {
   const orders = await prisma.order.findMany({
+    where: { deleted_at: null },
     orderBy: { delivery_date: { sort: "asc", nulls: "last" } },
     take: 200,
   });

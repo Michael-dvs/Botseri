@@ -5,7 +5,7 @@ import { z } from "zod";
 import { OrderPaymentStatus, OrderStatus } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
-
+import { recordEvent } from "@/lib/events";
 const UpdateOrderSchema = z.object({
   order_id: z.string().trim().min(1),
   action: z.enum([
@@ -19,7 +19,21 @@ const UpdateOrderSchema = z.object({
     "DELETE",
   ]),
   notes: z.string().optional(),
+  owner_chat_id: z.string().optional(),
+  message_id: z.string().optional(),
 });
+
+async function resolveOwnerChatId(reqOwnerChatId?: string | null): Promise<string> {
+  if (reqOwnerChatId && reqOwnerChatId.trim()) return reqOwnerChatId.trim();
+  const primary = await prisma.authorizedNumber.findFirst({
+    where: { is_owner: true, is_primary: true },
+  });
+  if (primary?.chat_id) return primary.chat_id;
+  const anyOwner = await prisma.authorizedNumber.findFirst({
+    where: { is_owner: true },
+  });
+  return anyOwner?.chat_id || "6281234567890@c.us";
+}
 
 function formatPaymentStatusText(status: OrderPaymentStatus): string {
   if (status === OrderPaymentStatus.PAID) return "Lunas";
@@ -78,6 +92,7 @@ export async function POST(request: Request) {
     const activeOrders = await prisma.order.findMany({
       where: {
         status: { in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+        deleted_at: null,
       },
       select: { id: true, customer_contact: true },
     });
@@ -89,43 +104,43 @@ export async function POST(request: Request) {
       });
     }
 
-    const orderIds = activeOrders.map((o) => o.id);
-    const updateData: {
-      status: OrderStatus;
-      completed_at: Date;
-      notes?: string;
-      payment_status?: OrderPaymentStatus;
-    } = {
-      status: OrderStatus.COMPLETED,
-      completed_at: new Date(),
-    };
-
-    if (notes) {
-      updateData.notes = notes;
+    // Batas Massal: Maksimum 50 pesanan per eksekusi ALL/SEMUA
+    if (activeOrders.length > 50) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Jumlah pesanan aktif melebihi batas maksimal eksekusi massal (maksimal 50 pesanan). Silakan proses pesanan satu per satu.",
+        },
+        { status: 400 }
+      );
     }
 
-    if (action === "COMPLETE_AND_PAY" || action === "MARK_PAID") {
-      updateData.payment_status = OrderPaymentStatus.PAID;
-    }
+    // Invariant INV-15: Konfirmasi Dua Langkah Deterministik di Sisi Server
+    const ownerChatId = await resolveOwnerChatId(parsed.data.owner_chat_id);
+    const previewText = `Konfirmasi eksekusi massal untuk ${activeOrders.length} pesanan aktif.`;
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
-    await prisma.order.updateMany({
-      where: { id: { in: orderIds } },
-      data: updateData,
+    await prisma.pendingConfirmation.create({
+      data: {
+        owner_chat_id: ownerChatId,
+        action: "BULK_COMPLETE",
+        payload_json: {
+          action,
+          order_ids: activeOrders.map((o) => o.id),
+          notes: notes || null,
+        },
+        preview_text: previewText,
+        created_message_id: parsed.data.message_id || null,
+        expires_at: expiresAt,
+      },
     });
-
-    const contacts = activeOrders
-      .map((o) => o.customer_contact)
-      .filter((c): c is string => Boolean(c));
-
-    for (const contact of contacts) {
-      await unmuteCustomerSession(contact);
-    }
 
     return NextResponse.json({
       ok: true,
-      action,
-      message: `Sebanyak ${activeOrders.length} pesanan aktif berhasil ditandai selesai.`,
-      updated_count: activeOrders.length,
+      requires_confirmation: true,
+      action: "BULK_COMPLETE",
+      preview: previewText,
+      instruksi_untuk_owner: "Balas YA untuk melanjutkan, atau abaikan untuk membatalkan.",
     });
   }
 
@@ -137,23 +152,36 @@ export async function POST(request: Request) {
     );
 
   let order = isUuid
-    ? await prisma.order.findUnique({ where: { id: cleanId } })
+    ? await prisma.order.findFirst({ where: { id: cleanId, deleted_at: null } })
     : null;
 
-  // 2. If not found by direct UUID, search by ID prefix or customer name
+  // 2. If not found by direct UUID, search by ID prefix or customer name with ambiguity check
   if (!order) {
     const prefix = `${cleanId}%`;
     const searchPattern = `%${cleanId}%`;
 
-    const candidates = await prisma.$queryRaw<Array<{ id: string }>>`
-      SELECT id FROM "orders"
-      WHERE "id"::text ILIKE ${prefix}
-         OR "customer_name" ILIKE ${searchPattern}
+    const candidates = await prisma.$queryRaw<Array<{ id: string; customer_name: string; description: string }>>`
+      SELECT id, customer_name, description FROM "orders"
+      WHERE ("id"::text ILIKE ${prefix} OR "customer_name" ILIKE ${searchPattern})
+        AND "deleted_at" IS NULL
       ORDER BY "created_at" DESC
-      LIMIT 1
+      LIMIT 5
     `;
 
-    if (candidates.length > 0) {
+    if (candidates.length > 1) {
+      return NextResponse.json({
+        ok: false,
+        ambiguous: true,
+        candidates: candidates.map((c) => ({
+          order_id: `#ORD-${c.id.slice(0, 8).toUpperCase()}`,
+          customer_name: c.customer_name,
+          service_type: c.description,
+        })),
+        message: "Ditemukan lebih dari 1 pesanan yang cocok dengan kueri tersebut. Mohon sebutkan ID pesanan yang lebih spesifik.",
+      });
+    }
+
+    if (candidates.length === 1) {
       order = await prisma.order.findUnique({
         where: { id: candidates[0].id },
       });
@@ -172,42 +200,40 @@ export async function POST(request: Request) {
 
   const shortId = `#ORD-${order.id.slice(0, 8).toUpperCase()}`;
 
-  // Action: DELETE
-  if (action === "DELETE") {
-    await prisma.order.delete({
-      where: { id: order.id },
-    });
-    await unmuteCustomerSession(order.customer_contact);
+  // Invariant INV-15: Aksi Destruktif (DELETE / CANCEL) Wajib Konfirmasi Dua Langkah
+  if (action === "DELETE" || action === "CANCEL") {
+    const ownerChatId = await resolveOwnerChatId(parsed.data.owner_chat_id);
+    const actionLabel = action === "DELETE" ? "HAPUS" : "BATALKAN";
+    const previewText = `Konfirmasi ${actionLabel} pesanan ${shortId} (${order.customer_name} - ${order.description}).`;
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
-    return NextResponse.json({
-      ok: true,
-      action: "DELETE",
-      message: `Pesanan ${shortId} (${order.customer_name}) berhasil dihapus dari sistem.`,
-    });
-  }
-
-  // Action: CANCEL
-  if (action === "CANCEL") {
-    await prisma.order.update({
-      where: { id: order.id },
+    await prisma.pendingConfirmation.create({
       data: {
-        status: OrderStatus.CANCELLED,
+        owner_chat_id: ownerChatId,
+        action,
+        payload_json: {
+          order_id: order.id,
+          action,
+          notes: notes || null,
+        },
+        preview_text: previewText,
+        created_message_id: parsed.data.message_id || null,
+        expires_at: expiresAt,
       },
     });
-    await unmuteCustomerSession(order.customer_contact);
 
     return NextResponse.json({
       ok: true,
-      action: "CANCEL",
-      message: `Pesanan ${shortId} (${order.customer_name}) telah DIBATALKAN.`,
+      requires_confirmation: true,
+      action,
+      preview: previewText,
+      instruksi_untuk_owner: "Balas YA untuk melanjutkan, atau abaikan untuk membatalkan.",
     });
   }
 
   // Action: MARK_COMPLETED / COMPLETE
   if (action === "MARK_COMPLETED" || action === "COMPLETE") {
-    const extraNotes = notes ? ` (${notes})` : "";
-    const updatedNotes =
-      (order.notes ? `${order.notes} | ` : "") + `[STATUS: SELESAI]${extraNotes}`;
+    const updatedNotes = notes ? (order.notes ? `${order.notes} | ${notes}` : notes) : order.notes;
 
     const updated = await prisma.order.update({
       where: { id: order.id },
@@ -218,6 +244,12 @@ export async function POST(request: Request) {
       },
     });
     await unmuteCustomerSession(order.customer_contact);
+    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
+      action: "MARK_COMPLETED",
+      order_id: order.id,
+      source_message_id: parsed.data.message_id || null,
+      affected_count: 1,
+    });
 
     const paymentText = formatPaymentStatusText(updated.payment_status);
     return NextResponse.json({
@@ -235,7 +267,12 @@ export async function POST(request: Request) {
         payment_status: OrderPaymentStatus.PAID,
       },
     });
-
+    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
+      action: "MARK_PAID",
+      order_id: order.id,
+      source_message_id: parsed.data.message_id || null,
+      affected_count: 1,
+    });
     const opText = formatOperationalStatusText(updated.status);
     return NextResponse.json({
       ok: true,
@@ -252,7 +289,12 @@ export async function POST(request: Request) {
         payment_status: OrderPaymentStatus.DP_PAID,
       },
     });
-
+    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
+      action: "MARK_DP",
+      order_id: order.id,
+      source_message_id: parsed.data.message_id || null,
+      affected_count: 1,
+    });
     const opText = formatOperationalStatusText(updated.status);
     return NextResponse.json({
       ok: true,
@@ -269,7 +311,12 @@ export async function POST(request: Request) {
         status: OrderStatus.IN_PROGRESS,
       },
     });
-
+    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
+      action: "MARK_IN_PROGRESS",
+      order_id: order.id,
+      source_message_id: parsed.data.message_id || null,
+      affected_count: 1,
+    });
     const paymentText = formatPaymentStatusText(updated.payment_status);
     return NextResponse.json({
       ok: true,
@@ -280,9 +327,7 @@ export async function POST(request: Request) {
 
   // Action: COMPLETE_AND_PAY
   if (action === "COMPLETE_AND_PAY") {
-    const extraNotes = notes ? ` (${notes})` : "";
-    const updatedNotes =
-      (order.notes ? `${order.notes} | ` : "") + `[STATUS: SELESAI]${extraNotes}`;
+    const updatedNotes = notes ? (order.notes ? `${order.notes} | ${notes}` : notes) : order.notes;
 
     await prisma.order.update({
       where: { id: order.id },
@@ -294,7 +339,12 @@ export async function POST(request: Request) {
       },
     });
     await unmuteCustomerSession(order.customer_contact);
-
+    await recordEvent("INFO", "OWNER_TOOL", "ORDER_MUTATED", {
+      action: "COMPLETE_AND_PAY",
+      order_id: order.id,
+      source_message_id: parsed.data.message_id || null,
+      affected_count: 1,
+    });
     return NextResponse.json({
       ok: true,
       action: "COMPLETE_AND_PAY",

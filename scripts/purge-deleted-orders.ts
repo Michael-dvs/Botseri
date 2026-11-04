@@ -1,0 +1,1 @@
+../dashboard/scripts/purge-deleted-orders.ts

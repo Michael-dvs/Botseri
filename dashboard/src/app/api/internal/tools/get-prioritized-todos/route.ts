@@ -7,6 +7,7 @@ import { id as localeId } from "date-fns/locale";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
 import { dateOnlyString, localDateString, localIsoString } from "@/lib/time";
+import { sanitizeUntrusted, wrapCustomerText } from "@/lib/security/untrusted";
 
 type Row = {
   id: string;
@@ -111,6 +112,7 @@ async function handleGetPrioritizedTodos(request: Request) {
     }),
     prisma.order.findMany({
       where: {
+        deleted_at: null,
         status: {
           in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS],
         },
@@ -156,16 +158,20 @@ async function handleGetPrioritizedTodos(request: Request) {
     remainingRows = mapped.slice(3);
   }
 
-  const mappedOrders = (upcomingOrders || []).map((o) => ({
-    order_id: `#ORD-${o.id.slice(0, 8).toUpperCase()}`,
-    customer_name: o.customer_name,
-    service_type: o.description,
-    event_date: o.event_date
-      ? formatInTimeZone(o.event_date, settings.timezone, "d MMMM yyyy", { locale: localeId })
-      : "-",
-    delivery_address: o.delivery_address || "-",
-    payment_status: o.payment_status,
-  }));
+  const mappedOrders = (upcomingOrders || []).map((o) => {
+    const customerTextObj = wrapCustomerText(o.notes || "-");
+    return {
+      order_id: `#ORD-${o.id.slice(0, 8).toUpperCase()}`,
+      customer_name: sanitizeUntrusted(o.customer_name, { maxLen: 150 }),
+      service_type: sanitizeUntrusted(o.description, { maxLen: 200 }),
+      event_date: o.event_date
+        ? formatInTimeZone(o.event_date, settings.timezone, "d MMMM yyyy", { locale: localeId })
+        : "-",
+      delivery_address: sanitizeUntrusted(o.delivery_address || "-", { maxLen: 500 }),
+      payment_status: o.payment_status,
+      customer_text: customerTextObj,
+    };
+  });
 
   const responsePayload: Record<string, unknown> = {
     ok: true,

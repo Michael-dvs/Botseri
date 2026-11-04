@@ -19,6 +19,7 @@ const updateSchema = z.object({
   payment_status: z.enum(["UNPAID", "DP_PAID", "PAID"]).optional(),
   status: z.enum(["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"]).optional(),
   notes: z.string().trim().max(4000).nullable().optional(),
+  restore: z.boolean().optional(),
 });
 
 function toResponse<
@@ -59,6 +60,24 @@ export async function PATCH(
       { ok: false, error: "tidak ditemukan" },
       { status: 404 },
     );
+  }
+  if (input.restore === true) {
+    try {
+      const restored = await prisma.order.update({
+        where: { id: params.id },
+        data: {
+          deleted_at: null,
+          status: "PENDING",
+        },
+      });
+      return NextResponse.json({ ok: true, order: toResponse(restored) });
+    } catch (error) {
+      log("ERROR", "api.orders", "restore failed", { id: params.id }, error);
+      return NextResponse.json(
+        { ok: false, error: "Gagal memulihkan pesanan" },
+        { status: 500 }
+      );
+    }
   }
 
   try {
@@ -141,18 +160,45 @@ export async function DELETE(
   { params }: { params: { id: string } },
 ) {
   if (!uuidSchema.safeParse(params.id).success) {
-    return NextResponse.json(
-      { ok: false, error: "tidak ditemukan" },
-      { status: 404 },
-    );
+    return NextResponse.json({ ok: false, error: "tidak ditemukan" }, { status: 400 });
   }
 
-  const deleted = await prisma.order.deleteMany({ where: { id: params.id } });
-  if (deleted.count === 0) {
+  const existing = await prisma.order.findUnique({ where: { id: params.id } });
+  if (!existing || existing.deleted_at !== null) {
+    return NextResponse.json({ ok: false, error: "tidak ditemukan" }, { status: 404 });
+  }
+
+  try {
+    const order = await prisma.order.update({
+      where: { id: params.id },
+      data: {
+        status: "CANCELLED",
+        deleted_at: new Date(),
+      },
+    });
+
+    if (order.customer_contact) {
+      const cleanPhone = order.customer_contact.trim();
+      const withPlus = cleanPhone.startsWith("+") ? cleanPhone : `+${cleanPhone}`;
+      const withoutPlus = cleanPhone.replace(/^\+/, "");
+
+      await prisma.customerSession.updateMany({
+        where: {
+          phone_e164: { in: [cleanPhone, withPlus, withoutPlus] },
+        },
+        data: {
+          state: "ACTIVE",
+          paused_at: null,
+        },
+      });
+    }
+
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    log("ERROR", "api.orders", "delete failed", { id: params.id }, error);
     return NextResponse.json(
-      { ok: false, error: "tidak ditemukan" },
-      { status: 404 },
+      { ok: false, error: "Gagal menghapus pesanan" },
+      { status: 500 }
     );
   }
-  return NextResponse.json({ ok: true });
 }

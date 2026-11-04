@@ -1,0 +1,1 @@
+../dashboard/scripts/clean-legacy-notes-status.ts

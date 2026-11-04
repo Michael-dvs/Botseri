@@ -23,6 +23,7 @@ type OrderRow = {
   payment_status: PaymentStatus;
   status?: OperationalStatus;
   notes: string | null;
+  deleted_at?: string | null;
 };
 
 const paymentLabels: Record<PaymentStatus, string> = {
@@ -63,13 +64,17 @@ function operationalBadge(status?: OperationalStatus) {
 
 export function OrderBoard({
   initialOrders,
+  initialDeletedOrders = [],
   timezone,
 }: {
   initialOrders: OrderRow[];
+  initialDeletedOrders?: OrderRow[];
   timezone: string;
 }) {
   const router = useRouter();
   const [orders, setOrders] = useState(initialOrders);
+  const [deletedOrders, setDeletedOrders] = useState(initialDeletedOrders);
+  const [viewTab, setViewTab] = useState<"ACTIVE" | "TRASH">("ACTIVE");
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -78,6 +83,9 @@ export function OrderBoard({
     setOrders(initialOrders);
   }, [initialOrders]);
 
+  useEffect(() => {
+    setDeletedOrders(initialDeletedOrders);
+  }, [initialDeletedOrders]);
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -248,7 +256,41 @@ export function OrderBoard({
       setOrders((current) =>
         current.filter((item) => item.id !== order.id),
       );
-      setMessage("Pesanan dihapus.");
+      setDeletedOrders((current) => [
+        { ...order, deleted_at: new Date().toISOString() },
+        ...current,
+      ]);
+      setMessage("Pesanan berhasil dipindahkan ke sampah.");
+      router.refresh();
+    } catch {
+      setError("Tidak dapat menghubungi server.");
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function restore(order: OrderRow) {
+    setPending(order.id);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/orders/${order.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ restore: true }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        setError(
+          typeof payload.error === "string"
+            ? payload.error
+            : "Gagal memulihkan pesanan.",
+        );
+        return;
+      }
+      setDeletedOrders((current) => current.filter((item) => item.id !== order.id));
+      setOrders((current) => [{ ...order, deleted_at: null, status: "PENDING" }, ...current]);
+      setMessage(`Pesanan ${order.customer_name} berhasil dipulihkan dari sampah.`);
       router.refresh();
     } catch {
       setError("Tidak dapat menghubungi server.");
@@ -408,6 +450,22 @@ export function OrderBoard({
           {message}
         </p>
       ) : null}
+      <div className="flex items-center gap-2 border-b border-[var(--line)] pb-2">
+        <button
+          type="button"
+          onClick={() => setViewTab("ACTIVE")}
+          className={`btn min-h-[44px] ${viewTab === "ACTIVE" ? "btn-primary" : "btn-quiet"}`}
+        >
+          Daftar Pesanan ({orders.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setViewTab("TRASH")}
+          className={`btn min-h-[44px] ${viewTab === "TRASH" ? "btn-primary" : "btn-quiet"}`}
+        >
+          Sampah ({deletedOrders.length})
+        </button>
+      </div>
 
       <div
         className="panel overflow-hidden"
@@ -417,14 +475,97 @@ export function OrderBoard({
         <div className="order-grid order-head border-b border-[var(--line)] bg-[var(--surface-muted)] px-4 py-2.5">
           <span className="eyebrow">Pelanggan</span>
           <span className="eyebrow">Pesanan</span>
-          <span className="eyebrow">Jadwal</span>
+          <span className="eyebrow">{viewTab === "TRASH" ? "Dihapus" : "Jadwal"}</span>
           <span className="eyebrow">Nilai</span>
           <span className="eyebrow">Pengerjaan</span>
           <span className="eyebrow">Pembayaran</span>
           <span className="eyebrow">Aksi</span>
         </div>
 
-        {orders.length === 0 ? (
+        {viewTab === "TRASH" ? (
+          deletedOrders.length === 0 ? (
+            <div className="p-8 text-center">
+              <p className="font-medium">Kotak sampah kosong.</p>
+              <p className="mt-1 text-sm text-[var(--muted)]">
+                Tidak ada pesanan yang dihapus dalam 30 hari terakhir.
+              </p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-[var(--line)]">
+              {deletedOrders.map((order) => {
+                const busy = pending === order.id;
+                return (
+                  <li key={order.id} className="order-grid order-row px-4 py-3 bg-[var(--surface-muted)]">
+                    <div className="order-cell min-w-0">
+                      <span className="cell-label">Pelanggan</span>
+                      <div className="cell-value min-w-0">
+                        <p className="font-medium text-stone-700">{order.customer_name}</p>
+                        <p className="mt-0.5 text-xs text-[var(--muted)]">
+                          {order.customer_contact ?? "Kontak belum diisi"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="order-cell min-w-0">
+                      <span className="cell-label">Pesanan</span>
+                      <div className="cell-value min-w-0">
+                        <p className="text-sm leading-5">{order.description}</p>
+                      </div>
+                    </div>
+
+                    <div className="order-cell">
+                      <span className="cell-label">Dihapus</span>
+                      <div className="cell-value">
+                        <p className="text-sm text-[var(--danger)]">
+                          {order.deleted_at
+                            ? formatLocalDateTime(order.deleted_at, timezone)
+                            : "Waktu tidak tercatat"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="order-cell">
+                      <span className="cell-label">Nilai</span>
+                      <div className="cell-value">
+                        <p className="text-sm">{money(order.total_amount)}</p>
+                      </div>
+                    </div>
+
+                    <div className="order-cell">
+                      <span className="cell-label">Pengerjaan</span>
+                      <div className="cell-value">
+                        <span className="badge badge-danger">Dihapus</span>
+                      </div>
+                    </div>
+
+                    <div className="order-cell">
+                      <span className="cell-label">Pembayaran</span>
+                      <div className="cell-value">
+                        <span className={paymentBadge(order.payment_status)}>
+                          {paymentLabels[order.payment_status]}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="order-cell">
+                      <span className="cell-label">Aksi</span>
+                      <div className="cell-value flex justify-end">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => restore(order)}
+                          className="btn btn-secondary min-h-[44px]"
+                        >
+                          Pulihkan
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )
+        ) : orders.length === 0 ? (
           <div className="p-8 text-center">
             <p className="font-medium">Belum ada pesanan.</p>
             <p className="mt-1 text-sm text-[var(--muted)]">

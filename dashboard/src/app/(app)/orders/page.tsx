@@ -32,27 +32,45 @@ export default async function OrdersPage() {
     );
   }
 
-  const orders = await prisma.order.findMany({
-    orderBy: { delivery_date: { sort: "asc", nulls: "last" } },
-    take: 200,
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const [orders, deletedOrders] = await Promise.all([
+    prisma.order.findMany({
+      where: { deleted_at: null },
+      orderBy: { delivery_date: { sort: "asc", nulls: "last" } },
+      take: 200,
+    }),
+    prisma.order.findMany({
+      where: {
+        deleted_at: {
+          not: null,
+          gte: thirtyDaysAgo,
+        },
+      },
+      orderBy: { deleted_at: "desc" },
+      take: 50,
+    }),
+  ]);
+
+  const mapOrder = (order: typeof orders[number]) => ({
+    id: order.id,
+    customer_name: order.customer_name,
+    customer_contact: order.customer_contact,
+    description: order.description,
+    event_date: order.event_date?.toISOString() ?? null,
+    delivery_date: order.delivery_date?.toISOString() ?? null,
+    delivery_address: order.delivery_address,
+    total_amount: order.total_amount === null ? null : Number(order.total_amount),
+    dp_amount: order.dp_amount === null ? null : Number(order.dp_amount),
+    payment_status: order.payment_status,
+    status: order.status,
+    notes: order.notes,
+    deleted_at: order.deleted_at?.toISOString() ?? null,
   });
 
   return (
     <OrderBoard
-      initialOrders={orders.map((order) => ({
-        id: order.id,
-        customer_name: order.customer_name,
-        customer_contact: order.customer_contact,
-        description: order.description,
-        event_date: order.event_date?.toISOString() ?? null,
-        delivery_date: order.delivery_date?.toISOString() ?? null,
-        delivery_address: order.delivery_address,
-        total_amount: order.total_amount === null ? null : Number(order.total_amount),
-        dp_amount: order.dp_amount === null ? null : Number(order.dp_amount),
-        payment_status: order.payment_status,
-        status: order.status,
-        notes: order.notes,
-      }))}
+      initialOrders={orders.map(mapOrder)}
+      initialDeletedOrders={deletedOrders.map(mapOrder)}
       timezone={settings.timezone}
     />
   );

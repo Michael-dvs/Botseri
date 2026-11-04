@@ -165,12 +165,14 @@ model Order {
   status           OrderStatus        @default(PENDING)
   completed_at     DateTime?          @db.Timestamptz
   notes            String?            @db.Text
+  deleted_at       DateTime?          @db.Timestamptz
   created_at       DateTime           @default(now()) @db.Timestamptz
   updated_at       DateTime           @default(now()) @updatedAt @db.Timestamptz
   todos            Todo[]
 
   @@index([status])
   @@index([customer_contact])
+  @@index([deleted_at])
   @@map("orders")
 }
 
@@ -380,4 +382,19 @@ model PipelineConfig {
   created_at  DateTime @default(now()) @db.Timestamptz()
 
   @@map("pipeline_configs")
+}
+
+model PendingConfirmation {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  owner_chat_id      String    @db.VarChar(100)
+  action             String    @db.VarChar(50)
+  payload_json       Json      @db.JsonB
+  preview_text       String    @db.Text
+  created_message_id String?   @db.VarChar(255)
+  created_at         DateTime  @default(now()) @db.Timestamptz
+  expires_at         DateTime  @db.Timestamptz
+  executed_at        DateTime? @db.Timestamptz
+
+  @@index([owner_chat_id, executed_at, expires_at])
+  @@map("pending_confirmations")
 }

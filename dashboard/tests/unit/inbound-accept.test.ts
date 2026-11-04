@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "../../src/app/api/internal/inbound/accept/route";
 import { pairingHash } from "../../src/lib/pairing";
-
+import { OrderStatus } from "@prisma/client";
 import { PERSONAL_ASSISTANT_PRESET } from "../../src/lib/pipeline/presets";
 const {
   authMock,
@@ -18,8 +18,14 @@ const {
   lookupLidContactMock,
   customerSessionFindUniqueMock,
   orderFindFirstMock,
+  orderFindUniqueMock,
+  orderUpdateMock,
+  orderFindManyMock,
+  orderUpdateManyMock,
   pipelineConfigFindUniqueMock,
   customerSessionUpdateManyMock,
+  pendingConfirmationFindFirstMock,
+  pendingConfirmationUpdateManyMock,
 } = vi.hoisted(() => ({
   authMock: vi.fn(),
   pairingCodeFindFirstMock: vi.fn(),
@@ -35,8 +41,14 @@ const {
   lookupLidContactMock: vi.fn(),
   customerSessionFindUniqueMock: vi.fn(),
   orderFindFirstMock: vi.fn(),
+  orderFindUniqueMock: vi.fn(),
+  orderUpdateMock: vi.fn(),
+  orderFindManyMock: vi.fn(),
+  orderUpdateManyMock: vi.fn(),
   pipelineConfigFindUniqueMock: vi.fn(),
   customerSessionUpdateManyMock: vi.fn(),
+  pendingConfirmationFindFirstMock: vi.fn(),
+  pendingConfirmationUpdateManyMock: vi.fn(),
 }));
 
 vi.mock("@/lib/waha/client", () => ({
@@ -84,8 +96,16 @@ vi.mock("@/lib/db", () => {
         findFirst: (...args: unknown[]) => authorizedNumberFindFirstMock(...args),
         upsert: (...args: unknown[]) => authorizedNumberUpsertMock(...args),
       },
+      pendingConfirmation: {
+        findFirst: (...args: unknown[]) => pendingConfirmationFindFirstMock(...args),
+        updateMany: (...args: unknown[]) => pendingConfirmationUpdateManyMock(...args),
+      },
       order: {
         findFirst: (...args: unknown[]) => orderFindFirstMock(...args),
+        findUnique: (...args: unknown[]) => orderFindUniqueMock(...args),
+        update: (...args: unknown[]) => orderUpdateMock(...args),
+        findMany: (...args: unknown[]) => orderFindManyMock(...args),
+        updateMany: (...args: unknown[]) => orderUpdateManyMock(...args),
       },
       pipelineConfig: {
         findUnique: (...args: unknown[]) => pipelineConfigFindUniqueMock(...args),
@@ -107,6 +127,9 @@ function makeRequest(body: Record<string, unknown>, authorized = true) {
 describe("POST /api/internal/inbound/accept", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    authMock.mockReturnValue(true);
+    pendingConfirmationFindFirstMock.mockResolvedValue(null);
+    pendingConfirmationUpdateManyMock.mockResolvedValue({ count: 1 });
     botSettingsFindUniqueMock.mockResolvedValue({
       id: 1,
       setup_completed: true,
@@ -537,5 +560,173 @@ describe("POST /api/internal/inbound/accept", () => {
     expect(data.paired).toBe(false);
     expect(data.reason).toBe("OK");
     expect(messageLogCreateMock).toHaveBeenCalled();
+  });
+
+  it("executes pending confirmation deterministically when owner replies 'ya' and sends CONFIRMATION_REPLY", async () => {
+    authorizedNumberFindFirstMock.mockResolvedValue({
+      id: "auth-1",
+      phone_e164: "+6281234567890",
+      chat_id: "6281234567890@c.us",
+      is_owner: true,
+    });
+    messageLogCreateMock.mockResolvedValue({
+      id: "log-confirm-1",
+      wa_message_id: "msg-owner-ya",
+      chat_id: "6281234567890@c.us",
+    });
+
+    pendingConfirmationFindFirstMock.mockResolvedValue({
+      id: "conf-1",
+      owner_chat_id: "6281234567890@c.us",
+      action: "DELETE",
+      payload_json: { order_id: "order-uuid-123" },
+      created_message_id: "msg-prev-command",
+      expires_at: new Date(Date.now() + 180_000), // 3 menit lagi
+    });
+
+    orderFindUniqueMock.mockResolvedValue({
+      id: "order-uuid-123",
+      customer_name: "Budi Santoso",
+      customer_contact: "+628111222333",
+    });
+    orderUpdateMock.mockResolvedValue({});
+
+    const req = makeRequest({
+      wa_message_id: "msg-owner-ya",
+      chat_id: "6281234567890@c.us",
+      body: "ya",
+      received_at: new Date().toISOString(),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.accept).toBe(true);
+    expect(data.reason).toBe("CONFIRMED_ACTION_EXECUTED");
+    expect(data.trigger_type).toBe("CONFIRMATION_REPLY");
+    expect(data.reply_text).toContain("berhasil dihapus");
+    expect(orderUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "order-uuid-123" },
+        data: expect.objectContaining({
+          status: OrderStatus.CANCELLED,
+          deleted_at: expect.any(Date),
+        }),
+      })
+    );
+    expect(customerSessionUpdateManyMock).toHaveBeenCalled();
+  });
+
+  it("prevents self-confirmation when message_id matches created_message_id", async () => {
+    authorizedNumberFindFirstMock.mockResolvedValue({
+      id: "auth-1",
+      phone_e164: "+6281234567890",
+      chat_id: "6281234567890@c.us",
+      is_owner: true,
+    });
+    messageLogCreateMock.mockResolvedValue({
+      id: "log-confirm-2",
+      wa_message_id: "msg-same-id",
+      chat_id: "6281234567890@c.us",
+    });
+
+    pendingConfirmationFindFirstMock.mockResolvedValue({
+      id: "conf-2",
+      owner_chat_id: "6281234567890@c.us",
+      action: "DELETE",
+      payload_json: { order_id: "order-uuid-123" },
+      created_message_id: "msg-same-id", // Same ID as incoming
+      expires_at: new Date(Date.now() + 180_000),
+    });
+
+    const req = makeRequest({
+      wa_message_id: "msg-same-id",
+      chat_id: "6281234567890@c.us",
+      body: "ya",
+      received_at: new Date().toISOString(),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    // Not confirmed because message_id matches created_message_id
+    expect(data.reason).toBe("OK");
+    expect(orderUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("returns CONFIRMATION_EXPIRED when pending confirmation has expired and owner replies 'ya'", async () => {
+    authorizedNumberFindFirstMock.mockResolvedValue({
+      id: "auth-1",
+      phone_e164: "+6281234567890",
+      chat_id: "6281234567890@c.us",
+      is_owner: true,
+    });
+    messageLogCreateMock.mockResolvedValue({
+      id: "log-confirm-3",
+      wa_message_id: "msg-late-ya",
+      chat_id: "6281234567890@c.us",
+    });
+
+    pendingConfirmationFindFirstMock
+      .mockResolvedValueOnce(null) // active pending check
+      .mockResolvedValueOnce({
+        id: "conf-expired",
+        owner_chat_id: "6281234567890@c.us",
+        expires_at: new Date(Date.now() - 60_000), // 1 menit lalu
+      });
+
+    const req = makeRequest({
+      wa_message_id: "msg-late-ya",
+      chat_id: "6281234567890@c.us",
+      body: "ya",
+      received_at: new Date().toISOString(),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.reason).toBe("CONFIRMATION_EXPIRED");
+    expect(data.trigger_type).toBe("CONFIRMATION_REPLY");
+    expect(data.reply_text).toContain("telah kedaluwarsa");
+    expect(orderUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("cancels pending confirmation when owner sends any other non-confirmation message", async () => {
+    authorizedNumberFindFirstMock.mockResolvedValue({
+      id: "auth-1",
+      phone_e164: "+6281234567890",
+      chat_id: "6281234567890@c.us",
+      is_owner: true,
+    });
+    messageLogCreateMock.mockResolvedValue({
+      id: "log-other-msg",
+      wa_message_id: "msg-other-1",
+      chat_id: "6281234567890@c.us",
+    });
+
+    pendingConfirmationFindFirstMock.mockResolvedValue({
+      id: "conf-to-cancel",
+      owner_chat_id: "6281234567890@c.us",
+      created_message_id: "msg-prev-cmd",
+      expires_at: new Date(Date.now() + 180_000),
+    });
+
+    const req = makeRequest({
+      wa_message_id: "msg-other-1",
+      chat_id: "6281234567890@c.us",
+      body: "apa agenda hari ini?",
+      received_at: new Date().toISOString(),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.reason).toBe("OK");
+    expect(pendingConfirmationUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "conf-to-cancel", executed_at: null },
+        data: { expires_at: new Date(0) },
+      })
+    );
   });
 });
