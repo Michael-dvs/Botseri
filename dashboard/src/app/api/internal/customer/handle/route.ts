@@ -28,7 +28,8 @@ import {
 } from "@/lib/customer/templates";
 import { getActivePipelineConfig, renderPipelineTemplate } from "@/lib/pipeline/manager";
 import { executeChainedCustomNodes, extractNodeMessageText, findDownstreamRouter } from "@/lib/pipeline/graph-runner";
-import type { PipelineGraphNode } from "@/lib/pipeline/schema";
+import { FLORIST_DECOR_PRESET } from "@/lib/pipeline/presets";
+import type { PipelineGraph, PipelineGraphNode } from "@/lib/pipeline/schema";
 
 const requestSchema = z.object({
   customer_phone: z.string().trim().min(1).max(50),
@@ -146,15 +147,25 @@ export async function POST(request: Request) {
   const { customer_phone, message_text, message_id, intent } = parsed.data;
 
   try {
-    // 1. Find or create session
+    // 1. Find or create session dengan normalisasi nomor
+    const rawPhone = customer_phone.trim().replace(/@(c\.us|s\.whatsapp\.net)$/i, "");
+    const digits = rawPhone.replace(/\D/g, "");
+    const cleanPhone = rawPhone.startsWith("+") ? rawPhone : (digits ? `+${digits}` : rawPhone);
+
     let session = await prisma.customerSession.findUnique({
       where: { phone_e164: customer_phone },
     });
 
+    if (!session && cleanPhone !== customer_phone) {
+      session = await prisma.customerSession.findUnique({
+        where: { phone_e164: cleanPhone },
+      });
+    }
+
     if (!session) {
       session = await prisma.customerSession.create({
         data: {
-          phone_e164: customer_phone,
+          phone_e164: cleanPhone,
           state: "INIT",
         },
       });
@@ -231,83 +242,90 @@ export async function POST(request: Request) {
     const replies: ReplyItem[] = [];
 
     // Check custom branch routing from visual graph (e.g. branch_3 on node-router)
-    if (session.state === "AWAITING_CHOICE" && pipeline.config.graph?.edges && pipeline.config.graph?.nodes) {
-      const activeRouterId = (meta.current_router_id as string | undefined) || undefined;
-      let routerNode: PipelineGraphNode | undefined = undefined;
-      let isStalePointer = false;
+    if (session.state === "AWAITING_CHOICE") {
+      try {
+        const graph: PipelineGraph = (pipeline.config.graph?.nodes?.length
+          ? pipeline.config.graph
+          : FLORIST_DECOR_PRESET.graph) || { nodes: [], edges: [] };
+        const activeRouterId = (meta.current_router_id as string | undefined) || undefined;
+        let routerNode: PipelineGraphNode | undefined = undefined;
+        let isStalePointer = false;
 
-      if (activeRouterId) {
-        const found = pipeline.config.graph.nodes.find((n) => n.id === activeRouterId);
-        if (found && found.type === "CONDITION_ROUTER") {
-          routerNode = found;
-        } else {
-          isStalePointer = true;
+        if (activeRouterId) {
+          const found = graph.nodes.find((n) => n.id === activeRouterId);
+          if (found && found.type === "CONDITION_ROUTER") {
+            routerNode = found;
+          } else {
+            isStalePointer = true;
+          }
         }
-      }
 
-      if (!routerNode) {
-        const explicitRootRouter = pipeline.config.graph.nodes.find(
-          (n) => (n.id === "node-router" || n.id === "root-router") && n.type === "CONDITION_ROUTER"
-        );
-        if (explicitRootRouter) {
-          routerNode = explicitRootRouter;
+        if (!routerNode) {
+          const explicitRootRouter = graph.nodes.find(
+            (n) => (n.id === "node-router" || n.id === "root-router") && n.type === "CONDITION_ROUTER"
+          );
+          if (explicitRootRouter) {
+            routerNode = explicitRootRouter;
+          }
         }
-      }
 
-      if (!routerNode) {
-        const triggerNode = pipeline.config.graph.nodes.find(
-          (n) => n.type === "TRIGGER_INBOUND" || n.id === "node-trigger"
-        );
-        const customerEdge = triggerNode
-          ? pipeline.config.graph.edges.find(
-              (e) => e.source === triggerNode.id && (e.sourceHandle === "out_customer" || !e.sourceHandle)
-            )
-          : undefined;
-        const initialGreeting =
-          (customerEdge ? pipeline.config.graph.nodes.find((n) => n.id === customerEdge.target) : undefined) ||
-          pipeline.config.graph.nodes.find((n) => n.id === "node-greeting");
+        if (!routerNode) {
+          const triggerNode = graph.nodes.find(
+            (n) => n.type === "TRIGGER_INBOUND" || n.id === "node-trigger"
+          );
+          const customerEdge = triggerNode
+            ? graph.edges.find(
+                (e) => e.source === triggerNode.id && (e.sourceHandle === "out_customer" || !e.sourceHandle)
+              )
+            : undefined;
+          const initialGreeting =
+            (customerEdge ? graph.nodes.find((n) => n.id === customerEdge.target) : undefined) ||
+            graph.nodes.find((n) => n.id === "node-greeting");
 
-        if (initialGreeting) {
-          routerNode = findDownstreamRouter(initialGreeting.id, pipeline.config.graph);
+          if (initialGreeting) {
+            routerNode = findDownstreamRouter(initialGreeting.id, graph);
+          }
         }
-      }
 
-      if (!routerNode) {
-        routerNode = pipeline.config.graph.nodes.find((n) => n.type === "CONDITION_ROUTER");
-      }
+        if (!routerNode) {
+          routerNode = graph.nodes.find((n) => n.type === "CONDITION_ROUTER");
+        }
 
-      if (isStalePointer && activeRouterId) {
-        await recordEvent("WARN", "customer_session", "PIPELINE_POINTER_STALE", {
-          phone_e164: session.phone_e164,
-          stale_router_id: activeRouterId,
-          fallback_router_id: routerNode?.id || null,
-        });
+        if (isStalePointer && activeRouterId) {
+          await recordEvent("WARN", "customer_session", "PIPELINE_POINTER_STALE", {
+            phone_e164: session.phone_e164,
+            stale_router_id: activeRouterId,
+            fallback_router_id: routerNode?.id || null,
+          });
 
-        // Reset pointer mati dari metadata sesi di database dan memori lokal
-        delete meta.current_router_id;
-        await prisma.customerSession.update({
-          where: { id: session.id },
-          data: {
-            metadata: meta as unknown as Prisma.InputJsonValue,
-          },
-        });
-      }
-      const routerId = routerNode?.id || "node-router";
-      const routerData = (routerNode?.data as Record<string, unknown>) || {};
-      const branches = Array.isArray(routerData.branches)
-        ? (routerData.branches as Array<{ id: string; label: string; keywords: string[] }>)
-        : null;
+          delete meta.current_router_id;
+          await prisma.customerSession.update({
+            where: { id: session.id },
+            data: {
+              metadata: meta as unknown as Prisma.InputJsonValue,
+            },
+          });
+        }
 
-      const cleanInput = message_text.trim().toLowerCase();
+        const routerId = routerNode?.id || "node-router";
+        const routerData = (routerNode?.data as Record<string, unknown>) || {};
+        const branches = (Array.isArray(routerData.branches) && routerData.branches.length > 0)
+          ? (routerData.branches as Array<{ id: string; label: string; keywords: string[] }>)
+          : [
+              { id: "branch_1", label: "Pilihan 1 (Order)", keywords: ["1", "pesan", "order"] },
+              { id: "branch_2", label: "Pilihan 2 (Tanya)", keywords: ["2", "tanya", "cs"] },
+              { id: "branch_3", label: "Pilihan 3 (Katalog)", keywords: ["3", "katalog", "menu"] },
+            ];
 
-      if (branches) {
+        const cleanInput = message_text.trim().toLowerCase();
+
         // 1. Check custom branches first (e.g. branch_3, branch_4)
         for (const branch of branches) {
           if (branch.id === "branch_1" || branch.id === "branch_2") continue;
           const isBranch3 = branch.id === "branch_3" || branch.id.includes("catalog") || branch.id.includes("katalog");
           const branchKeywords = Array.isArray(branch.keywords) ? branch.keywords : [];
           const isMatch =
-            (isBranch3 && cleanInput === "3") ||
+            (isBranch3 && (cleanInput === "3" || cleanInput.includes("katalog") || cleanInput.includes("menu"))) ||
             branchKeywords.some((kw) => {
               const cleanKw = String(kw).toLowerCase().trim();
               if (!cleanKw) return false;
@@ -315,7 +333,7 @@ export async function POST(request: Request) {
             });
 
           if (isMatch) {
-            const branchEdge = pipeline.config.graph.edges.find(
+            const branchEdge = graph.edges.find(
               (e) =>
                 e.source === routerId &&
                 (e.sourceHandle === branch.id ||
@@ -323,16 +341,16 @@ export async function POST(request: Request) {
                  (!e.sourceHandle && branch.id === "branch_3"))
             );
             const targetNode = branchEdge
-              ? pipeline.config.graph.nodes.find((n) => n.id === branchEdge.target)
+              ? graph.nodes.find((n) => n.id === branchEdge.target)
               : undefined;
 
             const chainedReplies = executeChainedCustomNodes(
               routerId,
               branch.id,
-              pipeline.config.graph,
+              graph,
               {
                 customer_name: session.customer_name || "Pelanggan",
-                customer_phone: customer_phone,
+                customer_phone: session.phone_e164,
                 last_message: message_text,
               }
             );
@@ -342,13 +360,13 @@ export async function POST(request: Request) {
               if (template) {
                 const renderedText = renderPipelineTemplate(template, {
                   customer_name: session.customer_name || "Pelanggan",
-                  customer_phone: customer_phone,
+                  customer_phone: session.phone_e164,
                   last_message: message_text,
                 });
                 chainedReplies.push({
-                  to: customer_phone,
-                  phone_e164: customer_phone,
-                  chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
+                  to: session.phone_e164,
+                  phone_e164: session.phone_e164,
+                  chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
                   body: renderedText,
                   text: renderedText,
                   trigger_type: "CUSTOMER_REPLY",
@@ -356,59 +374,67 @@ export async function POST(request: Request) {
               }
             }
 
-            if (chainedReplies.length > 0) {
-              for (const item of chainedReplies) {
-                replies.push({
-                  to: item.to || customer_phone,
-                  phone_e164: item.phone_e164 || customer_phone,
-                  chat_id: item.chat_id || `${customer_phone.replace(/\D/g, "")}@c.us`,
-                  body: item.body || item.text,
-                  text: item.text || item.body || "",
-                  trigger_type: item.trigger_type || "CUSTOMER_REPLY",
-                });
-              }
-
-              // Check if targetNode connects to another CONDITION_ROUTER (nested sub-router)
-              // Check if targetNode (atau rantai simpulnya) connects to another CONDITION_ROUTER (nested sub-router)
-              let nextRouterId: string | null = null;
-              if (targetNode) {
-                const chainedRouter = findDownstreamRouter(targetNode.id, pipeline.config.graph);
-                if (chainedRouter) {
-                  nextRouterId = chainedRouter.id;
-                }
-              }
-
-              const updatedMetadata: Prisma.InputJsonValue = {
-                ...meta,
-                current_router_id: nextRouterId,
-                retry_count: 0,
-                last_message_id: message_id || (meta.last_message_id as string | null) || null,
-              };
-
-              await prisma.customerSession.updateMany({
-                where: { id: session.id },
-                data: {
-                  state: "AWAITING_CHOICE",
-                  last_message_at: new Date(),
-                  metadata: updatedMetadata,
-                },
-              });
-
-              return NextResponse.json({
-                ok: true,
-                state_before: stateBefore,
-                state_after: "AWAITING_CHOICE",
-                replies,
+            if (chainedReplies.length === 0) {
+              const defaultKatalogText = "Silakan cek katalog lengkap kami di https://berseri.id/katalog ya Kak!\nBalas 1 untuk Pesan, atau 2 untuk Tanya Admin.";
+              chainedReplies.push({
+                to: session.phone_e164,
+                phone_e164: session.phone_e164,
+                chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
+                body: defaultKatalogText,
+                text: defaultKatalogText,
+                trigger_type: "CUSTOMER_REPLY",
               });
             }
+
+            for (const item of chainedReplies) {
+              replies.push({
+                to: item.to || session.phone_e164,
+                phone_e164: item.phone_e164 || session.phone_e164,
+                chat_id: item.chat_id || `${session.phone_e164.replace(/\D/g, "")}@c.us`,
+                body: item.body || item.text,
+                text: item.text || item.body || "",
+                trigger_type: item.trigger_type || "CUSTOMER_REPLY",
+              });
+            }
+
+            let nextRouterId: string | null = null;
+            if (targetNode) {
+              const chainedRouter = findDownstreamRouter(targetNode.id, graph);
+              if (chainedRouter) {
+                nextRouterId = chainedRouter.id;
+              }
+            }
+
+            const updatedMetadata: Prisma.InputJsonValue = {
+              ...meta,
+              current_router_id: nextRouterId,
+              retry_count: 0,
+              last_message_id: message_id || (meta.last_message_id as string | null) || null,
+            };
+
+            await prisma.customerSession.updateMany({
+              where: { id: session.id, state: stateBefore },
+              data: {
+                state: "AWAITING_CHOICE",
+                last_message_at: new Date(),
+                metadata: updatedMetadata,
+              },
+            });
+
+            return NextResponse.json({
+              ok: true,
+              state_before: stateBefore,
+              state_after: "AWAITING_CHOICE",
+              replies,
+            });
           }
         }
 
-        // 2. Check branch_1 (Order) on this router
+        // 2. Cabang 1 (Order)
         const b1 = branches.find((b) => b.id === "branch_1");
-        const b1Keywords = Array.isArray(b1?.keywords)
+        const b1Keywords = Array.isArray(b1?.keywords) && b1.keywords.length > 0
           ? b1.keywords
-          : greetingConf.order_trigger_keywords;
+          : greetingConf.order_trigger_keywords || ["1", "pesan", "order", "beli"];
         const isB1Match =
           cleanInput === "1" ||
           b1Keywords.some((kw) => {
@@ -418,7 +444,7 @@ export async function POST(request: Request) {
           });
 
         if (isB1Match) {
-          const b1Edge = pipeline.config.graph.edges.find(
+          const b1Edge = graph.edges.find(
             (e) =>
               e.source === routerId &&
               (e.sourceHandle === "branch_1" ||
@@ -427,50 +453,51 @@ export async function POST(request: Request) {
                e.sourceHandle?.toLowerCase().includes("pesan"))
           );
           const targetNode = b1Edge
-            ? pipeline.config.graph.nodes.find((n) => n.id === b1Edge.target)
-            : pipeline.config.graph.nodes.find((n) => n.type === "ORDER_FORM_PROCESSOR" || n.id === "node-form");
+            ? graph.nodes.find((n) => n.id === b1Edge.target)
+            : graph.nodes.find((n) => n.type === "ORDER_FORM_PROCESSOR" || n.id === "node-form");
 
           const formText =
             (targetNode ? extractNodeMessageText(targetNode) : "") ||
             (formConf.enabled ? (formConf.form_template_text || T2_ORDER_FORM) : T2_ORDER_FORM);
-            replies.push({
-              to: customer_phone,
-              phone_e164: customer_phone,
-              chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
-              body: formText,
-              text: formText,
-              trigger_type: "CUSTOMER_REPLY",
-            });
 
-            const updatedMetadata: Prisma.InputJsonValue = {
-              ...meta,
-              current_router_id: null,
-              retry_count: 0,
-              last_message_id: message_id || (meta.last_message_id as string | null) || null,
-            };
+          replies.push({
+            to: session.phone_e164,
+            phone_e164: session.phone_e164,
+            chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
+            body: formText,
+            text: formText,
+            trigger_type: "CUSTOMER_REPLY",
+          });
 
-            await prisma.customerSession.updateMany({
-              where: { id: session.id },
-              data: {
-                state: "AWAITING_ORDER",
-                last_message_at: new Date(),
-                metadata: updatedMetadata,
-              },
-            });
+          const updatedMetadata: Prisma.InputJsonValue = {
+            ...meta,
+            current_router_id: null,
+            retry_count: 0,
+            last_message_id: message_id || (meta.last_message_id as string | null) || null,
+          };
 
-            return NextResponse.json({
-              ok: true,
-              state_before: stateBefore,
-              state_after: "AWAITING_ORDER",
-              replies,
-            });
+          await prisma.customerSession.updateMany({
+            where: { id: session.id, state: stateBefore },
+            data: {
+              state: "AWAITING_ORDER",
+              last_message_at: new Date(),
+              metadata: updatedMetadata,
+            },
+          });
+
+          return NextResponse.json({
+            ok: true,
+            state_before: stateBefore,
+            state_after: "AWAITING_ORDER",
+            replies,
+          });
         }
 
-        // 3. Check branch_2 (Tanya) on this router
+        // 3. Cabang 2 (Konsultasi / Tanya)
         const b2 = branches.find((b) => b.id === "branch_2");
-        const b2Keywords = Array.isArray(b2?.keywords)
+        const b2Keywords = Array.isArray(b2?.keywords) && b2.keywords.length > 0
           ? b2.keywords
-          : greetingConf.ask_trigger_keywords;
+          : greetingConf.ask_trigger_keywords || ["2", "tanya", "konsultasi", "cs", "admin"];
         const isB2Match =
           cleanInput === "2" ||
           b2Keywords.some((kw) => {
@@ -480,7 +507,7 @@ export async function POST(request: Request) {
           });
 
         if (isB2Match) {
-          const b2Edge = pipeline.config.graph.edges.find(
+          const b2Edge = graph.edges.find(
             (e) =>
               e.source === routerId &&
               (e.sourceHandle === "branch_2" ||
@@ -490,75 +517,75 @@ export async function POST(request: Request) {
                e.sourceHandle?.toLowerCase().includes("handover"))
           );
           const targetNode = b2Edge
-            ? pipeline.config.graph.nodes.find((n) => n.id === b2Edge.target)
-            : pipeline.config.graph.nodes.find((n) => n.type === "CS_HANDOVER" || n.id === "node-handover");
+            ? graph.nodes.find((n) => n.id === b2Edge.target)
+            : graph.nodes.find((n) => n.type === "CS_HANDOVER" || n.id === "node-handover");
 
           const handoverText =
             (targetNode ? extractNodeMessageText(targetNode) : "") ||
             (handoverConf.enabled ? (handoverConf.handover_customer_text || T3_PAUSE_NOTICE) : T3_PAUSE_NOTICE);
-            replies.push({
-              to: customer_phone,
-              phone_e164: customer_phone,
-              chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
-              body: handoverText,
-              text: handoverText,
-              trigger_type: "CUSTOMER_REPLY",
-            });
 
-            if (!handoverConf.enabled || handoverConf.notify_owner) {
-              try {
-                const primaryOwner = await getPrimaryOwner();
-                if (primaryOwner) {
-                  const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
-                  const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
-                  const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-                  const alertTemplate = handoverConf.owner_handover_alert_template || ownerAlert(customer_phone, message_text);
-                  const alertText = renderPipelineTemplate(alertTemplate, {
-                    customer_phone,
-                    last_message: sanitized,
-                  });
-                  replies.push({
-                    to: ownerPhone,
-                    phone_e164: primaryOwner.phone_e164 || ownerPhone,
-                    chat_id: ownerChatId,
-                    body: alertText,
-                    text: alertText,
-                    trigger_type: "CUSTOMER_REPLY",
-                  });
-                }
-              } catch (ownerPauseAlertErr) {
-                console.error("Failed to prepare owner alert, continuing with customer reply:", ownerPauseAlertErr);
+          replies.push({
+            to: session.phone_e164,
+            phone_e164: session.phone_e164,
+            chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
+            body: handoverText,
+            text: handoverText,
+            trigger_type: "CUSTOMER_REPLY",
+          });
+
+          if (!handoverConf.enabled || handoverConf.notify_owner) {
+            try {
+              const primaryOwner = await getPrimaryOwner();
+              if (primaryOwner) {
+                const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
+                const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
+                const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+                const alertTemplate = handoverConf.owner_handover_alert_template || ownerAlert(session.phone_e164, message_text);
+                const alertText = renderPipelineTemplate(alertTemplate, {
+                  customer_phone: session.phone_e164,
+                  last_message: sanitized,
+                });
+                replies.push({
+                  to: ownerPhone,
+                  phone_e164: primaryOwner.phone_e164 || ownerPhone,
+                  chat_id: ownerChatId,
+                  body: alertText,
+                  text: alertText,
+                  trigger_type: "CUSTOMER_REPLY",
+                });
               }
+            } catch (ownerPauseAlertErr) {
+              console.error("Failed to prepare owner alert, continuing with customer reply:", ownerPauseAlertErr);
             }
+          }
 
-            const updatedMetadata: Prisma.InputJsonValue = {
-              ...meta,
-              current_router_id: null,
-              retry_count: 0,
-              last_message_id: message_id || (meta.last_message_id as string | null) || null,
-            };
+          const updatedMetadata: Prisma.InputJsonValue = {
+            ...meta,
+            current_router_id: null,
+            retry_count: 0,
+            last_message_id: message_id || (meta.last_message_id as string | null) || null,
+          };
 
-            await prisma.customerSession.updateMany({
-              where: { id: session.id },
-              data: {
-                state: "PAUSED_FOR_OWNER",
-                paused_at: new Date(),
-                last_message_at: new Date(),
-                metadata: updatedMetadata,
-              },
-            });
+          await prisma.customerSession.updateMany({
+            where: { id: session.id, state: stateBefore },
+            data: {
+              state: "PAUSED_FOR_OWNER",
+              paused_at: new Date(),
+              last_message_at: new Date(),
+              metadata: updatedMetadata,
+            },
+          });
 
-            return NextResponse.json({
-              ok: true,
-              state_before: stateBefore,
-              state_after: "PAUSED_FOR_OWNER",
-              replies,
-            });
+          return NextResponse.json({
+            ok: true,
+            state_before: stateBefore,
+            state_after: "PAUSED_FOR_OWNER",
+            replies,
+          });
         }
 
         // 4. Input Tidak Dikenal (Fallback Otomatis & Port Fallback)
-        // a) Cek port "fallback" / "branch_fallback" pada router tersebut
-        const fallbackEdge = pipeline.config.graph.edges.find(
+        const fallbackEdge = graph.edges.find(
           (e) =>
             e.source === routerId &&
             (e.sourceHandle === "branch_fallback" ||
@@ -567,44 +594,42 @@ export async function POST(request: Request) {
         );
 
         let fallbackReplyText = "";
-        let nextRouterIdAfterFallback: string | null = activeRouterId || routerId;
+        let nextRouterIdAfterFallback: string | null = routerNode?.id || activeRouterId || null;
 
         if (fallbackEdge) {
-          const fallbackTargetNode = pipeline.config.graph.nodes.find((n) => n.id === fallbackEdge.target);
+          const fallbackTargetNode = graph.nodes.find((n) => n.id === fallbackEdge.target);
           if (fallbackTargetNode) {
             const rawMsg = extractNodeMessageText(fallbackTargetNode);
             if (rawMsg) {
               fallbackReplyText = renderPipelineTemplate(rawMsg, {
                 customer_name: session.customer_name || "Pelanggan",
-                customer_phone: customer_phone,
+                customer_phone: session.phone_e164,
                 last_message: message_text,
               });
             }
-            const downstreamRouter = findDownstreamRouter(fallbackTargetNode.id, pipeline.config.graph);
+            const downstreamRouter = findDownstreamRouter(fallbackTargetNode.id, graph);
             if (downstreamRouter) {
               nextRouterIdAfterFallback = downstreamRouter.id;
             }
           }
         }
 
-        // b) Jika port fallback tidak terhubung atau pesan kosong:
         if (!fallbackReplyText) {
           const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
           fallbackReplyText =
             routerFallbackText ||
-            "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai pilihan menu ya Kak.";
+            "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai menu ya Kak.";
         }
 
         replies.push({
-          to: customer_phone,
-          phone_e164: customer_phone,
-          chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
+          to: session.phone_e164,
+          phone_e164: session.phone_e164,
+          chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
           body: fallbackReplyText,
           text: fallbackReplyText,
           trigger_type: "CUSTOMER_REPLY",
         });
 
-        // c) PENTING: Pertahankan status sesi tetap AWAITING_CHOICE dan pertahankan current_router_id pada router aktif saat ini!
         const currentRetry = typeof meta.retry_count === "number" ? meta.retry_count : 0;
         const updatedMetadata: Prisma.InputJsonValue = {
           ...meta,
@@ -614,7 +639,7 @@ export async function POST(request: Request) {
         };
 
         await prisma.customerSession.updateMany({
-          where: { id: session.id },
+          where: { id: session.id, state: stateBefore },
           data: {
             state: "AWAITING_CHOICE",
             last_message_at: new Date(),
@@ -627,6 +652,24 @@ export async function POST(request: Request) {
           state_before: stateBefore,
           state_after: "AWAITING_CHOICE",
           replies,
+        });
+      } catch (choiceError) {
+        console.error("[CUSTOMER_HANDLE_CHOICE_ERROR] Gagal mengevaluasi alur pilihan:", choiceError);
+        const fallbackText = "Mohon maaf Kak, terjadi kendala saat memproses menu 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 ya Kak.";
+        return NextResponse.json({
+          ok: true,
+          state_before: stateBefore,
+          state_after: "AWAITING_CHOICE",
+          replies: [
+            {
+              to: session.phone_e164,
+              phone_e164: session.phone_e164,
+              chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
+              body: fallbackText,
+              text: fallbackText,
+              trigger_type: "CUSTOMER_REPLY",
+            },
+          ],
         });
       }
     }
@@ -652,7 +695,7 @@ export async function POST(request: Request) {
     // 5. Execute Actions
     if (transResult.action === "SEND_GREETING") {
       // Simpul node-greeting HANYA boleh dieksekusi jika sesi berstatus INIT
-      if (session.state === "AWAITING_CHOICE" || session.state === "AWAITING_ORDER") {
+      if (session.state === "AWAITING_ORDER") {
         return NextResponse.json({
           ok: true,
           state_before: stateBefore,
@@ -1131,10 +1174,23 @@ export async function POST(request: Request) {
       replies,
     });
   } catch (error) {
-    console.error("Unhandled error in /api/internal/customer/handle:", error);
-    return NextResponse.json(
-      { ok: false, error: "Internal Server Error" },
-      { status: 500 }
-    );
+    console.error("[CUSTOMER_HANDLE_FATAL_ERROR] Unhandled error in customer/handle:", error);
+    const emergencyReply = "Mohon maaf Kak, terjadi kendala saat memproses menu 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 ya Kak.";
+    const fallbackPhone = parsed?.data?.customer_phone || "";
+    return NextResponse.json({
+      ok: true,
+      state_before: "INIT",
+      state_after: "AWAITING_CHOICE",
+      replies: [
+        {
+          to: fallbackPhone,
+          phone_e164: fallbackPhone,
+          chat_id: `${fallbackPhone.replace(/\D/g, "")}@c.us`,
+          body: emergencyReply,
+          text: emergencyReply,
+          trigger_type: "CUSTOMER_REPLY",
+        },
+      ],
+    });
   }
 }

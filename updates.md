@@ -23,6 +23,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Hotfix: Kompatibilitas Promise Antrean WAHA & Pencegahan Hang Studio Alur](#2026-11-05-hotfix-kompatibilitas-promise-antrean-waha--pencegahan-hang-studio-alur)
 - [[2026-11-05] Perbaikan Sub-Menu Chaining (Pilihan 3), Guard Sapaan Awal, & Handler Fallback Input](#2026-11-05-perbaikan-sub-menu-chaining-pilihan-3-guard-sapaan-awal--handler-fallback-input)
 - [[2026-11-05] Perbaikan Penyimpanan current_router_id, Auto-Resolve Root Router, & Eliminasi Silent Drops](#2026-11-05-perbaikan-penyimpanan-current_router_id-auto-resolve-root-router--eliminasi-silent-drops)
+- [[2026-11-05] Hotfix Kritis: Eliminasi Silent Drops & Jaminan Eksekusi Fallback customer/handle](#2026-11-05-hotfix-kritis-eliminasi-silent-drops--jaminan-eksekusi-fallback-customerhandle)
 
 ---
 
@@ -2067,4 +2068,40 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 5. Known Issues / Catatan Operasional
 - Metadata sesi `customer_sessions` kini dipastikan selalu memiliki properti `current_router_id` terdefinisi sejak sapaan pertama kali dikirimkan.
+
+## [2026-11-05] Hotfix Kritis: Eliminasi Silent Drops & Jaminan Eksekusi Fallback customer/handle
+
+### 1. Ringkasan Pekerjaan
+1. **Normalisasi Nomor Telepon Inbound:**
+   - Memastikan nomor `customer_phone` dinormalisasi secara toleran ke format E.164 (`+62...`) dan memeriksa keberadaan sesi baik dengan awalan `+` maupun tanpa `+` untuk mencegah miskomunikasi format antara n8n dan database.
+2. **Overhaul Defensif State AWAITING_CHOICE:**
+   - Memastikan blok evaluasi `AWAITING_CHOICE` selalu berjalan bahkan jika konfigurasi graf belum dimuat (otomatis fallback ke graf preset).
+   - Memperbaiki penentuan cabang: jika `branches` kosong atau tidak terdefinisi di database, sistem menggunakan cabang standar 1 (Pesan), 2 (Tanya), dan 3 (Katalog).
+   - Menyelaraskan seluruh properti balasan (`to`, `phone_e164`, `chat_id`, `body`, `text`) agar terisi lengkap untuk konsumsi n8n.
+3. **Penyelamatan Error Boundary & Anti-Membisu Mutlak:**
+   - Membungkus seluruh logika evaluasi percabangan alur dalam blok `try/catch` mandiri: jika terjadi kegagalan tak terduga, sistem mengirimkan balasan darurat dan mengembalikan HTTP 200.
+   - Mengubah handler fatal tingkat atas agar tidak mengembalikan HTTP 500 (yang memicu silent drop di n8n), melainkan mengembalikan HTTP 200 dengan balasan sopan kepada pelanggan di WhatsApp.
+
+### 2. Commit Git
+- Commit format: `fix: eliminasi silent drops dan jamin eksekusi fallback di customer/handle`
+
+### 3. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada hotfix ini.
+
+### 4. Bukti Verifikasi
+1. **Unit Test Suite Lengkap:** `npm test -- --run` · 50 test files, 454 test cases passed (100% lulus, exit code 0).
+2. **Router Resolution Tests:** `npx vitest run tests/unit/pipeline-router-resolution.test.ts` · 7 passed (100% lulus, exit code 0).
+3. **Customer Handle Tests:** `npx vitest run tests/unit/customer-handle.test.ts` · 19 passed (100% lulus, exit code 0).
+4. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% lulus, exit code 0).
+5. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · 30 passed (100% lulus, exit code 0).
+6. **TypeScript Typecheck:** `npx tsc --noEmit` · Lulus bersih (0 error).
+7. **ESLint:** `npm run lint` · Lulus bersih (0 warning, 0 error).
+8. **Next.js Standalone Build:** `npm run build` · 27 rute berhasil dikompilasi (exit code 0).
+9. **Workflow Validation:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+10. **Secret Scanner:** `./scripts/check-secrets.sh` · 0 secret terekspos (exit code 0).
+11. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (14/14 PASS, exit code 0).
+12. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 5. Known Issues / Catatan Operasional
+- Endpoint `/api/internal/customer/handle` kini dijamin 100% selalu mengembalikan array `replies` terisi untuk n8n dan tidak pernah melempar HTTP 500 pada chat interaktif pelanggan.
 
