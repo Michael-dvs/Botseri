@@ -21,6 +21,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] S14: Dokumentasi, Operasional, & Penutupan Utang Lama](#2026-11-05-s14-dokumentasi-operasional-dan-penutupan-utang-lama-p2)
 - [[2026-11-05] S15: Akseptansi Akhir & Penutupan Patch Plan](#2026-11-05-s15-akseptansi-akhir-dan-penutupan-patch-plan)
 - [[2026-11-05] Hotfix: Kompatibilitas Promise Antrean WAHA & Pencegahan Hang Studio Alur](#2026-11-05-hotfix-kompatibilitas-promise-antrean-waha--pencegahan-hang-studio-alur)
+- [[2026-11-05] Perbaikan Sub-Menu Chaining (Pilihan 3), Guard Sapaan Awal, & Handler Fallback Input](#2026-11-05-perbaikan-sub-menu-chaining-pilihan-3-guard-sapaan-awal--handler-fallback-input)
 
 ---
 
@@ -1976,3 +1977,44 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 ### 5. Known Issues / Catatan Operasional
 - Seluruh proses deferred promise kini 100% kompatibel dengan Node.js versi 18, 20, dan 22+.
 - Halaman Studio Alur (`/pipeline`) kini dapat dinavigasi ke halaman lain secara instan tanpa membebani CPU browser.
+
+## [2026-11-05] Perbaikan Sub-Menu Chaining (Pilihan 3), Guard Sapaan Awal, & Handler Fallback Input
+
+### 1. Ringkasan Pekerjaan
+1. **Ekstraksi Pesan Polimorfik & Penelusuran Sub-Router (`findDownstreamRouter`):**
+   - Memperluas fungsi `extractNodeMessageText` di `graph-runner.ts` agar mengekstrak seluruh properti pesan (`message_template`, `greeting_text`, `message_text`, `body`, `text`, `content`, `message`) dari node `MESSAGE_MENU` non-root maupun `CUSTOM_WA_REPLY`.
+   - Membangun fungsi murni `findDownstreamRouter` yang aman terhadap siklus untuk menelusuri rantai kabel keluar dan mendeteksi simpul `CONDITION_ROUTER` turunan secara otomatis.
+   - Menyimpan `nextRouterId` ke dalam `metadata.current_router_id` saat pelanggan memilih cabang sub-menu (Pilihan 3 / Katalog).
+2. **Pencegahan Re-Trigger Sapaan Awal:**
+   - Menegakkan aturan ketat bahwa simpul `node-greeting` HANYA dieksekusi jika sesi berstatus `INIT` (pelanggan baru pertama kali).
+   - Memastikan saat pelanggan berada di status `AWAITING_CHOICE` atau `AWAITING_ORDER`, input pelanggan tidak pernah memicu eksekusi ulang `node-greeting`.
+   - Evaluasi pilihan setelah katalog (Pilihan 1) langsung mengalir ke Formulir Order (`AWAITING_ORDER`).
+3. **Handler Fallback Input Tidak Dikenal:**
+   - Jika pelanggan mengirim input di luar cabang terdaftar pada router aktif, sistem memeriksa koneksi port `fallback` / `branch_fallback`.
+   - Jika port fallback tidak terhubung, sistem mengirim pesan deterministik:
+     `"Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka atau pilihan yang tertera pada menu di atas ya Kak."`
+   - Status sesi tetap dipertahankan `AWAITING_CHOICE` dan `current_router_id` tetap mengunci router aktif tanpa me-reset sesi ke sapaan awal.
+
+### 2. Commit Git
+- Commit format: `fix: perbaiki sub-menu chaining pilihan 3, cegah reset sapaan awal, dan terapkan fallback input`
+
+### 3. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada perbaikan ini.
+
+### 4. Bukti Verifikasi
+1. **Unit Test Suite Lengkap:** `npm test -- --run` · 49 test files, 447 test cases passed (100% lulus, exit code 0).
+2. **Parity Tests Sub-Menu (21, 22, 23):** `npx vitest run tests/unit/pipeline-parity.test.ts` · 23 passed (100% lulus, exit code 0).
+3. **Customer Handle Tests (14, 15, 16):** `npx vitest run tests/unit/customer-handle.test.ts` · 19 passed (100% lulus, exit code 0).
+4. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% lulus, exit code 0).
+5. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · 30 passed (100% lulus, exit code 0).
+6. **TypeScript Typecheck:** `npx tsc --noEmit` · Lulus bersih (0 error).
+7. **ESLint:** `npm run lint` · Lulus bersih (0 warning, 0 error).
+8. **Next.js Standalone Build:** `npm run build` · 27 rute berhasil dikompilasi (exit code 0).
+9. **Workflow Validation:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+10. **Secret Scanner:** `./scripts/check-secrets.sh` · 0 secret terekspos (exit code 0).
+11. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (14/14 PASS, exit code 0).
+12. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 5. Known Issues / Catatan Operasional
+- Seluruh navigasi percabangan bertingkat (root router -> sub-menu -> sub-router -> order form) kini terekam secara konsisten di kolom `metadata.current_router_id` pada tabel `customer_sessions`.
+

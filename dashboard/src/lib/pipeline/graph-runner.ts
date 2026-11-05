@@ -35,9 +35,45 @@ export function extractNodeMessageText(
     data.handover_customer_text ||
     data.customer_confirmation_template ||
     data.body ||
+    data.text ||
+    data.content ||
+    data.message ||
     "";
 
   return typeof rawText === "string" ? rawText.trim() : "";
+}
+
+/**
+ * Menelusuri kabel keluar dari suatu simpul (atau rantai simpul perantara) untuk menemukan CONDITION_ROUTER turunan.
+ * Aman terhadap siklus dengan pelacak visited Set.
+ */
+export function findDownstreamRouter(
+  startNodeId: string,
+  graph: PipelineGraph | undefined,
+  visited = new Set<string>()
+): PipelineGraphNode | undefined {
+  if (!graph || !graph.edges || !graph.nodes || visited.has(startNodeId)) return undefined;
+  visited.add(startNodeId);
+
+  const nodeMap = new Map<string, PipelineGraphNode>(
+    graph.nodes.map((n) => [n.id, n])
+  );
+
+  const outgoingEdges = graph.edges.filter((e) => e.source === startNodeId);
+  for (const edge of outgoingEdges) {
+    const target = nodeMap.get(edge.target);
+    if (!target) continue;
+    if (target.type === "CONDITION_ROUTER") {
+      return target;
+    }
+    // Jika target adalah node pesan perantara (MESSAGE_MENU / CUSTOM_WA_REPLY), telusuri ke bawah
+    if (target.type === "MESSAGE_MENU" || target.type === "CUSTOM_WA_REPLY") {
+      const deeper = findDownstreamRouter(target.id, graph, visited);
+      if (deeper) return deeper;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -88,7 +124,15 @@ export function executeChainedCustomNodes(
     const matchingEdges = graph.edges.filter((e) => {
       if (e.source !== currentSourceId) return false;
       if (currentHandle) {
-        return e.sourceHandle === currentHandle;
+        if (e.sourceHandle === currentHandle) return true;
+        if (currentHandle === "out_next") {
+          return (
+            !e.sourceHandle ||
+            e.sourceHandle === "out" ||
+            e.sourceHandle.toLowerCase().includes("lanjut")
+          );
+        }
+        return false;
       }
       return true;
     });
@@ -97,8 +141,8 @@ export function executeChainedCustomNodes(
       matchingEdges.length > 0
         ? matchingEdges[0]
         : currentHandle
-          ? graph.edges.find((e) => e.source === currentSourceId && !e.sourceHandle)
-          : undefined;
+          ? graph.edges.find((e) => e.source === currentSourceId && (!e.sourceHandle || e.sourceHandle === "out_next" || e.sourceHandle.toLowerCase().includes("lanjut")))
+          : graph.edges.find((e) => e.source === currentSourceId);
 
     if (!nextEdge) break;
 

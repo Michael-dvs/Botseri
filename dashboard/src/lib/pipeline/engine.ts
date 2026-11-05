@@ -5,7 +5,7 @@ import type {
   PipelineGraphNode,
 } from "./schema";
 import { renderPipelineTemplate } from "./manager";
-import { executeChainedCustomNodes, extractNodeMessageText } from "./graph-runner";
+import { executeChainedCustomNodes, extractNodeMessageText, findDownstreamRouter } from "./graph-runner";
 import { looksLikeOrderForm, parseOrderForm, type OrderDraft } from "@/lib/customer/orderFormat";
 
 export interface PipelineContext {
@@ -343,7 +343,11 @@ export function runPipelineStep(
         });
 
         const branchEdge = graph.edges.find(
-          (e) => e.source === routerId && (e.sourceHandle === branch.id || (!e.sourceHandle && branch.id === "branch_3"))
+          (e) =>
+            e.source === routerId &&
+            (e.sourceHandle === branch.id ||
+             e.sourceHandle?.toLowerCase().includes(branch.id.toLowerCase()) ||
+             (!e.sourceHandle && branch.id === "branch_3"))
         );
 
         if (branchEdge && isMatch) {
@@ -375,22 +379,14 @@ export function runPipelineStep(
             }
           }
 
-          // Periksa apakah targetNode terhubung ke sub-router bertingkat
+          // Periksa apakah targetNode (atau rantai simpulnya) terhubung ke sub-router bertingkat
           let nextActiveRouterId: string | undefined = undefined;
           if (targetNode) {
-            const chainedEdge = graph.edges.find(
-              (e) => e.source === targetNode.id && (e.sourceHandle === "out_next" || !e.sourceHandle)
-            );
-            if (chainedEdge) {
-              const chainedRouter = graph.nodes.find(
-                (n) => n.id === chainedEdge.target && n.type === "CONDITION_ROUTER"
-              );
-              if (chainedRouter) {
-                activeEdges.push(chainedEdge.id);
-                visited.push(chainedRouter.id);
-                nextActiveRouterId = chainedRouter.id;
-                log.push(`Navigasi ke sub-menu: ${(chainedRouter.data?.label as string) || chainedRouter.id}`);
-              }
+            const chainedRouter = findDownstreamRouter(targetNode.id, graph);
+            if (chainedRouter) {
+              visited.push(chainedRouter.id);
+              nextActiveRouterId = chainedRouter.id;
+              log.push(`Navigasi ke sub-menu: ${(chainedRouter.data?.label as string) || chainedRouter.id}`);
             }
           }
 
@@ -425,7 +421,14 @@ export function runPipelineStep(
     });
 
     if (isB1Match) {
-      const b1Edge = graph.edges.find((e) => e.source === routerId && e.sourceHandle === "branch_1");
+      const b1Edge = graph.edges.find(
+        (e) =>
+          e.source === routerId &&
+          (e.sourceHandle === "branch_1" ||
+           e.sourceHandle?.toLowerCase().includes("branch_1") ||
+           e.sourceHandle?.toLowerCase().includes("order") ||
+           e.sourceHandle?.toLowerCase().includes("pesan"))
+      );
       if (b1Edge) {
         activeEdges.push(b1Edge.id);
         visited.push(b1Edge.target);
@@ -478,7 +481,15 @@ export function runPipelineStep(
     });
 
     if (isB2Match) {
-      const b2Edge = graph.edges.find((e) => e.source === routerId && e.sourceHandle === "branch_2");
+      const b2Edge = graph.edges.find(
+        (e) =>
+          e.source === routerId &&
+          (e.sourceHandle === "branch_2" ||
+           e.sourceHandle?.toLowerCase().includes("branch_2") ||
+           e.sourceHandle?.toLowerCase().includes("tanya") ||
+           e.sourceHandle?.toLowerCase().includes("cs") ||
+           e.sourceHandle?.toLowerCase().includes("handover"))
+      );
       if (b2Edge) {
         activeEdges.push(b2Edge.id);
         visited.push(b2Edge.target);
@@ -525,75 +536,68 @@ export function runPipelineStep(
       };
     }
 
-    // 5d. Input Tidak Dikenal (Fallback / Anti-Bisu)
-    const currentRetry = ctx.retryCount || 0;
-    if (currentRetry < 3) {
-      const fallbackText =
-        (routerData.fallback_reply_text as string) ||
-        config.customer_greeting?.unrecognized_choice_text ||
-        "Mohon maaf Kak, balas 1 untuk pesan atau 2 untuk tanya-tanya.";
+    // 5d. Input Tidak Dikenal (Fallback Otomatis & Port Fallback)
+    // a) Cek apakah port "fallback" pada router tersebut memiliki kabel koneksi ke node target
+    const fallbackEdge = graph.edges.find(
+      (e) =>
+        e.source === routerId &&
+        (e.sourceHandle === "branch_fallback" ||
+         e.sourceHandle === "fallback" ||
+         e.sourceHandle?.toLowerCase().includes("fallback"))
+    );
 
-      replies.push(fallbackText);
-      actions.push({
-        type: "SEND_MESSAGE",
-        text: fallbackText,
-        trigger_type: "CUSTOMER_REPLY",
-      });
-      actions.push({
-        type: "UPDATE_SESSION",
-        nextState: "AWAITING_CHOICE",
-        retryCount: currentRetry + 1,
-        nextRouterId: ctx.currentRouterId,
-      });
-      log.push("Input tidak cocok dengan kata kunci menu. Mengirimkan pengingat.");
+    let fallbackText = "";
+    let nextRouterIdAfterFallback: string | undefined = routerId;
 
-      return {
-        actions,
-        nodeTrace: visited,
-        activeEdgeIds: activeEdges,
-        nextState: "AWAITING_CHOICE",
-        nextRouterId: ctx.currentRouterId,
-        log,
-        replies,
-      };
+    if (fallbackEdge) {
+      activeEdges.push(fallbackEdge.id);
+      visited.push(fallbackEdge.target);
+      const fallbackTargetNode = graph.nodes.find((n) => n.id === fallbackEdge.target);
+      if (fallbackTargetNode) {
+        const rawMsg = extractNodeMessageText(fallbackTargetNode);
+        if (rawMsg) {
+          fallbackText = renderPipelineTemplate(rawMsg, sampleVars);
+        }
+        const downstream = findDownstreamRouter(fallbackTargetNode.id, graph);
+        if (downstream) {
+          nextRouterIdAfterFallback = downstream.id;
+        }
+      }
     }
 
-    // Jika retry >= 3, otomatis eskalasi ke CS Handover
-    const handoverNode = graph.nodes.find((n) => n.type === "CS_HANDOVER" || n.id === "node-handover");
-    if (handoverNode) visited.push(handoverNode.id);
+    // b) Jika port "fallback" KOSONG / TIDAK TERHUBUNG:
+    if (!fallbackText) {
+      const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
+      fallbackText =
+        routerFallbackText ||
+        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka atau pilihan yang tertera pada menu di atas ya Kak.";
+    }
 
-    const handoverText =
-      extractNodeMessageText(handoverNode) ||
-      config.cs_handover?.handover_customer_text ||
-      "Siap Kak! Pertanyaan sudah kami sampaikan ke Owner.";
-
-    replies.push(handoverText);
+    replies.push(fallbackText);
     actions.push({
       type: "SEND_MESSAGE",
-      text: handoverText,
+      text: fallbackText,
       trigger_type: "CUSTOMER_REPLY",
     });
-    actions.push({
-      type: "CS_HANDOVER",
-      customerPhone: ctx.customerPhone || sampleVars.customer_phone,
-      lastMessage: input.text,
-    });
+    // c) PENTING: Pertahankan status sesi tetap AWAITING_CHOICE dan pertahankan current_router_id pada router aktif saat ini!
     actions.push({
       type: "UPDATE_SESSION",
-      nextState: "PAUSED_FOR_OWNER",
-      pausedAt: new Date(),
+      nextState: "AWAITING_CHOICE",
+      retryCount: (ctx.retryCount || 0) + 1,
+      nextRouterId: nextRouterIdAfterFallback,
     });
-    log.push("Batas retry tercapai (3x). Mengeskalasikan otomatis ke CS Handover.");
+    log.push("Input tidak cocok dengan kata kunci menu. Mengirimkan umpan balik format.");
 
     return {
       actions,
       nodeTrace: visited,
       activeEdgeIds: activeEdges,
-      nextState: "PAUSED_FOR_OWNER",
-      nextRouterId: null,
+      nextState: "AWAITING_CHOICE",
+      nextRouterId: nextRouterIdAfterFallback,
       log,
       replies,
     };
+
   }
 
   // 6. Default AWAITING_ORDER tanpa format lengkap

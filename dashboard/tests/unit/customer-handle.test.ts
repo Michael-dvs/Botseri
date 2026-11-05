@@ -810,4 +810,223 @@ describe("POST /api/internal/customer/handle", () => {
     expect(data.replies[0].text).toContain("Berseri Florist & Decor");
     expect(data.replies[0].text).not.toContain("drive.google.com");
   });
+
+  it("Case 14: Sub-menu chaining with non-root MESSAGE_MENU extracts message and updates current_router_id", async () => {
+    const pipelineConfig = {
+      ...FLORIST_DECOR_PRESET,
+      graph: {
+        nodes: [
+          {
+            id: "node-router",
+            type: "CONDITION_ROUTER" as const,
+            position: { x: 400, y: 0 },
+            data: {
+              branches: [
+                { id: "branch_1", label: "Pilihan 1 (Order)", keywords: ["1", "pesan"] },
+                { id: "branch_2", label: "Pilihan 2 (Tanya)", keywords: ["2", "tanya"] },
+                { id: "branch_3", label: "Katalog", keywords: ["3", "katalog"] },
+              ],
+            },
+          },
+          {
+            id: "node-menu-katalog",
+            type: "MESSAGE_MENU" as const,
+            position: { x: 700, y: 100 },
+            data: {
+              label: "Menu / Sapaan Baru",
+              message_text: "Silakan pilih katalog:\n1. Buket Bunga\n2. Bunga Meja\nLink: https://berseri.id/katalog",
+            },
+          },
+          {
+            id: "node-router-katalog",
+            type: "CONDITION_ROUTER" as const,
+            position: { x: 950, y: 100 },
+            data: {
+              branches: [
+                { id: "branch_1", label: "Pesan Buket", keywords: ["1", "buket"] },
+                { id: "branch_2", label: "Tanya CS", keywords: ["2", "tanya"] },
+              ],
+            },
+          },
+        ],
+        edges: [
+          { id: "e-katalog", source: "node-router", target: "node-menu-katalog", sourceHandle: "branch_3" },
+          { id: "e-sub-router", source: "node-menu-katalog", target: "node-router-katalog", sourceHandle: "out_next" },
+        ],
+      },
+    };
+
+    pipelineConfigFindUniqueMock.mockResolvedValue({
+      id: 1,
+      name: "Pipeline with Catalog Sub-Menu",
+      preset_key: "FLORIST_DECOR",
+      config_json: pipelineConfig,
+      version: 5,
+    });
+
+    customerSessionFindUniqueMock.mockResolvedValue({
+      id: "sess-sub-chain-1",
+      phone_e164: "+628123456789",
+      state: "AWAITING_CHOICE",
+      customer_name: "Andi",
+      paused_at: null,
+      metadata: { retry_count: 0 },
+    });
+    customerSessionUpdateManyMock.mockResolvedValue({ count: 1 });
+
+    const req = makeRequest({
+      customer_phone: "+628123456789",
+      message_text: "3",
+      message_id: "msg-choose-3",
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(data.state_after).toBe("AWAITING_CHOICE");
+    expect(data.replies[0].text).toContain("https://berseri.id/katalog");
+    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            current_router_id: "node-router-katalog",
+          }),
+        }),
+      })
+    );
+  });
+
+  it("Case 15: Post-catalog choice 1 flows to Order Form without resetting to greeting", async () => {
+    const pipelineConfig = {
+      ...FLORIST_DECOR_PRESET,
+      graph: {
+        nodes: [
+          {
+            id: "node-greeting",
+            type: "MESSAGE_MENU" as const,
+            position: { x: 100, y: 0 },
+            data: { greeting_text: "Halo Kak! Ini sapaan awal toko." },
+          },
+          {
+            id: "node-router-katalog",
+            type: "CONDITION_ROUTER" as const,
+            position: { x: 400, y: 0 },
+            data: {
+              branches: [
+                { id: "branch_1", label: "Pesan Sekarang", keywords: ["1", "pesan"] },
+                { id: "branch_2", label: "Tanya CS", keywords: ["2", "tanya"] },
+              ],
+            },
+          },
+          {
+            id: "node-form",
+            type: "ORDER_FORM_PROCESSOR" as const,
+            position: { x: 700, y: 0 },
+            data: { form_template_text: "*FORMAT PESANAN BERSERI*\n* Nama Pemesan:" },
+          },
+        ],
+        edges: [
+          { id: "e-sub-order", source: "node-router-katalog", target: "node-form", sourceHandle: "branch_1" },
+        ],
+      },
+    };
+
+    pipelineConfigFindUniqueMock.mockResolvedValue({
+      id: 1,
+      name: "Pipeline Post Catalog",
+      preset_key: "FLORIST_DECOR",
+      config_json: pipelineConfig,
+      version: 5,
+    });
+
+    customerSessionFindUniqueMock.mockResolvedValue({
+      id: "sess-sub-chain-2",
+      phone_e164: "+628123456789",
+      state: "AWAITING_CHOICE",
+      customer_name: "Andi",
+      paused_at: null,
+      metadata: { current_router_id: "node-router-katalog", retry_count: 0 },
+    });
+    customerSessionUpdateManyMock.mockResolvedValue({ count: 1 });
+
+    const req = makeRequest({
+      customer_phone: "+628123456789",
+      message_text: "1",
+      message_id: "msg-choose-1-post-cat",
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(data.state_after).toBe("AWAITING_ORDER");
+    expect(data.replies[0].text).toContain("FORMAT PESANAN BERSERI");
+    expect(data.replies[0].text).not.toContain("Ini sapaan awal toko");
+  });
+
+  it("Case 16: Unrecognized input in AWAITING_CHOICE returns deterministic fallback and retains current_router_id", async () => {
+    const pipelineConfig = {
+      ...FLORIST_DECOR_PRESET,
+      graph: {
+        nodes: [
+          {
+            id: "node-router-sub",
+            type: "CONDITION_ROUTER" as const,
+            position: { x: 400, y: 0 },
+            data: {
+              branches: [
+                { id: "branch_1", label: "Pilihan 1", keywords: ["1"] },
+                { id: "branch_2", label: "Pilihan 2", keywords: ["2"] },
+              ],
+              // fallback_reply_text sengaja tidak diisi agar menguji default deterministik
+            },
+          },
+        ],
+        edges: [],
+      },
+    };
+
+    pipelineConfigFindUniqueMock.mockResolvedValue({
+      id: 1,
+      name: "Pipeline Fallback",
+      preset_key: "FLORIST_DECOR",
+      config_json: pipelineConfig,
+      version: 5,
+    });
+
+    customerSessionFindUniqueMock.mockResolvedValue({
+      id: "sess-sub-chain-3",
+      phone_e164: "+628123456789",
+      state: "AWAITING_CHOICE",
+      customer_name: "Andi",
+      paused_at: null,
+      metadata: { current_router_id: "node-router-sub", retry_count: 0 },
+    });
+    customerSessionUpdateManyMock.mockResolvedValue({ count: 1 });
+
+    const req = makeRequest({
+      customer_phone: "+628123456789",
+      message_text: "99",
+      message_id: "msg-invalid-99",
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(data.state_after).toBe("AWAITING_CHOICE");
+    expect(data.replies[0].text).toContain("pilihan belum sesuai format");
+    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          state: "AWAITING_CHOICE",
+          metadata: expect.objectContaining({
+            current_router_id: "node-router-sub",
+            retry_count: 1,
+          }),
+        }),
+      })
+    );
+  });
 });

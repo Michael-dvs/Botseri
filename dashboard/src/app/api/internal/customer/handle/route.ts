@@ -27,7 +27,7 @@ import {
   formatDateIndo,
 } from "@/lib/customer/templates";
 import { getActivePipelineConfig, renderPipelineTemplate } from "@/lib/pipeline/manager";
-import { executeChainedCustomNodes, extractNodeMessageText } from "@/lib/pipeline/graph-runner";
+import { executeChainedCustomNodes, extractNodeMessageText, findDownstreamRouter } from "@/lib/pipeline/graph-runner";
 import type { PipelineGraphNode } from "@/lib/pipeline/schema";
 
 const requestSchema = z.object({
@@ -298,7 +298,11 @@ export async function POST(request: Request) {
 
           if (isMatch) {
             const branchEdge = pipeline.config.graph.edges.find(
-              (e) => e.source === routerId && (e.sourceHandle === branch.id || (!e.sourceHandle && branch.id === "branch_3"))
+              (e) =>
+                e.source === routerId &&
+                (e.sourceHandle === branch.id ||
+                 e.sourceHandle?.toLowerCase().includes(branch.id.toLowerCase()) ||
+                 (!e.sourceHandle && branch.id === "branch_3"))
             );
             const targetNode = branchEdge
               ? pipeline.config.graph.nodes.find((n) => n.id === branchEdge.target)
@@ -347,18 +351,12 @@ export async function POST(request: Request) {
               }
 
               // Check if targetNode connects to another CONDITION_ROUTER (nested sub-router)
+              // Check if targetNode (atau rantai simpulnya) connects to another CONDITION_ROUTER (nested sub-router)
               let nextRouterId: string | null = null;
               if (targetNode) {
-                const chainedEdge = pipeline.config.graph.edges.find(
-                  (e) => e.source === targetNode.id && (e.sourceHandle === "out_next" || !e.sourceHandle)
-                );
-                if (chainedEdge) {
-                  const nextRouter = pipeline.config.graph.nodes.find(
-                    (n) => n.id === chainedEdge.target && n.type === "CONDITION_ROUTER"
-                  );
-                  if (nextRouter) {
-                    nextRouterId = nextRouter.id;
-                  }
+                const chainedRouter = findDownstreamRouter(targetNode.id, pipeline.config.graph);
+                if (chainedRouter) {
+                  nextRouterId = chainedRouter.id;
                 }
               }
 
@@ -401,14 +399,20 @@ export async function POST(request: Request) {
 
         if (isB1Match) {
           const b1Edge = pipeline.config.graph.edges.find(
-            (e) => e.source === routerId && e.sourceHandle === "branch_1"
+            (e) =>
+              e.source === routerId &&
+              (e.sourceHandle === "branch_1" ||
+               e.sourceHandle?.toLowerCase().includes("branch_1") ||
+               e.sourceHandle?.toLowerCase().includes("order") ||
+               e.sourceHandle?.toLowerCase().includes("pesan"))
           );
-          if (b1Edge) {
-            const targetNode = pipeline.config.graph.nodes.find((n) => n.id === b1Edge.target);
-            const formText =
-              (targetNode ? extractNodeMessageText(targetNode) : "") ||
-              (formConf.enabled ? (formConf.form_template_text || T2_ORDER_FORM) : T2_ORDER_FORM);
+          const targetNode = b1Edge
+            ? pipeline.config.graph.nodes.find((n) => n.id === b1Edge.target)
+            : pipeline.config.graph.nodes.find((n) => n.type === "ORDER_FORM_PROCESSOR" || n.id === "node-form");
 
+          const formText =
+            (targetNode ? extractNodeMessageText(targetNode) : "") ||
+            (formConf.enabled ? (formConf.form_template_text || T2_ORDER_FORM) : T2_ORDER_FORM);
             replies.push({
               to: customer_phone,
               phone_e164: customer_phone,
@@ -440,7 +444,6 @@ export async function POST(request: Request) {
               state_after: "AWAITING_ORDER",
               replies,
             });
-          }
         }
 
         // 3. Check branch_2 (Tanya) on this router
@@ -456,14 +459,21 @@ export async function POST(request: Request) {
 
         if (isB2Match) {
           const b2Edge = pipeline.config.graph.edges.find(
-            (e) => e.source === routerId && e.sourceHandle === "branch_2"
+            (e) =>
+              e.source === routerId &&
+              (e.sourceHandle === "branch_2" ||
+               e.sourceHandle?.toLowerCase().includes("branch_2") ||
+               e.sourceHandle?.toLowerCase().includes("tanya") ||
+               e.sourceHandle?.toLowerCase().includes("cs") ||
+               e.sourceHandle?.toLowerCase().includes("handover"))
           );
-          if (b2Edge) {
-            const targetNode = pipeline.config.graph.nodes.find((n) => n.id === b2Edge.target);
-            const handoverText =
-              (targetNode ? extractNodeMessageText(targetNode) : "") ||
-              (handoverConf.enabled ? (handoverConf.handover_customer_text || T3_PAUSE_NOTICE) : T3_PAUSE_NOTICE);
+          const targetNode = b2Edge
+            ? pipeline.config.graph.nodes.find((n) => n.id === b2Edge.target)
+            : pipeline.config.graph.nodes.find((n) => n.type === "CS_HANDOVER" || n.id === "node-handover");
 
+          const handoverText =
+            (targetNode ? extractNodeMessageText(targetNode) : "") ||
+            (handoverConf.enabled ? (handoverConf.handover_customer_text || T3_PAUSE_NOTICE) : T3_PAUSE_NOTICE);
             replies.push({
               to: customer_phone,
               phone_e164: customer_phone,
@@ -522,28 +532,62 @@ export async function POST(request: Request) {
               state_after: "PAUSED_FOR_OWNER",
               replies,
             });
+        }
+
+        // 4. Input Tidak Dikenal (Fallback Otomatis & Port Fallback)
+        // a) Cek port "fallback" / "branch_fallback" pada router tersebut
+        const fallbackEdge = pipeline.config.graph.edges.find(
+          (e) =>
+            e.source === routerId &&
+            (e.sourceHandle === "branch_fallback" ||
+             e.sourceHandle === "fallback" ||
+             e.sourceHandle?.toLowerCase().includes("fallback"))
+        );
+
+        let fallbackReplyText = "";
+        let nextRouterIdAfterFallback: string | null = activeRouterId || routerId;
+
+        if (fallbackEdge) {
+          const fallbackTargetNode = pipeline.config.graph.nodes.find((n) => n.id === fallbackEdge.target);
+          if (fallbackTargetNode) {
+            const rawMsg = extractNodeMessageText(fallbackTargetNode);
+            if (rawMsg) {
+              fallbackReplyText = renderPipelineTemplate(rawMsg, {
+                customer_name: session.customer_name || "Pelanggan",
+                customer_phone: customer_phone,
+                last_message: message_text,
+              });
+            }
+            const downstreamRouter = findDownstreamRouter(fallbackTargetNode.id, pipeline.config.graph);
+            if (downstreamRouter) {
+              nextRouterIdAfterFallback = downstreamRouter.id;
+            }
           }
         }
 
-        // 4. Unrecognized choice on this router -> Anti-Bisu Fallback
-        const fallbackText =
-          (routerData.fallback_reply_text as string) ||
-          greetingConf.unrecognized_choice_text ||
-          "Mohon maaf Kak, kami belum menangkap pilihannya. Silakan balas sesuai opsi menu yang tersedia ya Kak.";
+        // b) Jika port fallback tidak terhubung atau pesan kosong:
+        if (!fallbackReplyText) {
+          const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
+          fallbackReplyText =
+            routerFallbackText ||
+            "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka atau pilihan yang tertera pada menu di atas ya Kak.";
+        }
 
         replies.push({
           to: customer_phone,
           phone_e164: customer_phone,
           chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
-          body: fallbackText,
-          text: fallbackText,
+          body: fallbackReplyText,
+          text: fallbackReplyText,
           trigger_type: "CUSTOMER_REPLY",
         });
 
+        // c) PENTING: Pertahankan status sesi tetap AWAITING_CHOICE dan pertahankan current_router_id pada router aktif saat ini!
+        const currentRetry = typeof meta.retry_count === "number" ? meta.retry_count : 0;
         const updatedMetadata: Prisma.InputJsonValue = {
           ...meta,
-          current_router_id: activeRouterId, // Retain active router for retry
-          retry_count: (typeof meta.retry_count === "number" ? meta.retry_count : 0) + 1,
+          current_router_id: nextRouterIdAfterFallback,
+          retry_count: currentRetry + 1,
           last_message_id: message_id || (meta.last_message_id as string | null) || null,
         };
 
@@ -585,8 +629,17 @@ export async function POST(request: Request) {
 
     // 5. Execute Actions
     if (transResult.action === "SEND_GREETING") {
-      let greetingText = greetingConf.enabled ? (greetingConf.greeting_text || T1_GREETING) : T1_GREETING;
+      // Simpul node-greeting HANYA boleh dieksekusi jika sesi berstatus INIT
+      if (session.state === "AWAITING_CHOICE" || session.state === "AWAITING_ORDER") {
+        return NextResponse.json({
+          ok: true,
+          state_before: stateBefore,
+          state_after: session.state,
+          replies,
+        });
+      }
 
+      let greetingText = greetingConf.enabled ? (greetingConf.greeting_text || T1_GREETING) : T1_GREETING;
       if (pipeline.config.graph?.nodes && pipeline.config.graph?.edges) {
         const triggerNode =
           pipeline.config.graph.nodes.find((n) => n.type === "TRIGGER_INBOUND" || n.id === "node-trigger") ||

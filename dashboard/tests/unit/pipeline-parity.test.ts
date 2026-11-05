@@ -198,4 +198,81 @@ describe("S10: 20 Skenario Uji Paritas Pipeline Simulator vs Runtime", () => {
   it("Skenario 20: Pesan baru setelah pesanan selesai (State ACTIVE ke AWAITING_CHOICE)", () => {
     assertParity("20-ACTIVE_NEW_CONVERSATION", "ACTIVE", "Halo mau nanya lagi");
   });
+
+  it("Skenario 21: Pilihan 3 (Katalog) memindahkan current_router_id ke router turunan", () => {
+    const res = runPipelineStep(
+      {
+        config: testConfig,
+        sessionState: "AWAITING_CHOICE",
+        currentRouterId: "node-router",
+      },
+      { text: "3" }
+    );
+    expect(res.nextState).toBe("AWAITING_CHOICE");
+    expect(res.nextRouterId).toBe("node-sub-router");
+    expect(res.replies[0]).toContain("https://berseri.id/katalog");
+    assertParity("21-SUB_ROUTER_CHAINING", "AWAITING_CHOICE", "3");
+  });
+
+  it("Skenario 22: Pilihan 1 setelah di router turunan mengalir ke Formulir Order (bukan sapaan)", () => {
+    // Buat konfigurasi dengan sub-router yang memiliki cabang 1 menuju node-form
+    const graphWithSubOrder: PipelineGraph = {
+      ...testGraph,
+      edges: [
+        ...testGraph.edges,
+        { id: "e-sub-order", source: "node-sub-router", target: "node-form", sourceHandle: "branch_1" },
+      ],
+    };
+    const subOrderConfig: PipelineConfigData = {
+      ...testConfig,
+      graph: graphWithSubOrder,
+    };
+
+    const res = runPipelineStep(
+      {
+        config: subOrderConfig,
+        sessionState: "AWAITING_CHOICE",
+        currentRouterId: "node-sub-router",
+      },
+      { text: "1" }
+    );
+    expect(res.nextState).toBe("AWAITING_ORDER");
+    expect(res.replies[0]).toContain("FORMAT PESANAN BERSERI");
+    expect(res.replies[0]).not.toContain("Halo Kak! Selamat datang");
+  });
+
+  it("Skenario 23: Input di luar pilihan ('99' / 'halo') menghasilkan fallback dan mempertahankan router", () => {
+    // 1. Pada router dengan custom fallback_reply_text: menggunakan teks kustom router
+    const resCustom = runPipelineStep(
+      {
+        config: testConfig,
+        sessionState: "AWAITING_CHOICE",
+        currentRouterId: "node-sub-router",
+      },
+      { text: "99" }
+    );
+    expect(resCustom.nextState).toBe("AWAITING_CHOICE");
+    expect(resCustom.nextRouterId).toBe("node-sub-router");
+    expect(resCustom.replies[0]).toContain("Ketik 'buket' atau 'dekor'");
+    assertParity("23-FALLBACK_RETAIN_ROUTER", "AWAITING_CHOICE", "99", "node-sub-router");
+
+    // 2. Pada router tanpa fallback_reply_text: menghasilkan fallback deterministik standar
+    const graphNoFallbackText: PipelineGraph = {
+      ...testGraph,
+      nodes: testGraph.nodes.map((n) =>
+        n.id === "node-sub-router" ? { ...n, data: { ...n.data, fallback_reply_text: undefined } } : n
+      ),
+    };
+    const resStandard = runPipelineStep(
+      {
+        config: { ...testConfig, graph: graphNoFallbackText },
+        sessionState: "AWAITING_CHOICE",
+        currentRouterId: "node-sub-router",
+      },
+      { text: "99" }
+    );
+    expect(resStandard.nextState).toBe("AWAITING_CHOICE");
+    expect(resStandard.nextRouterId).toBe("node-sub-router");
+    expect(resStandard.replies[0]).toContain("pilihan belum sesuai format");
+  });
 });
