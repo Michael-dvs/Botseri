@@ -1730,3 +1730,53 @@ Menerapkan penimpaan parameter otoritatif (`temperature` dan `max_output_tokens`
   DROP INDEX IF EXISTS "llm_configs_one_fallback";
   ALTER TABLE "llm_configs" DROP COLUMN IF EXISTS "is_fallback";
   ```
+
+## [2026-11-05] S12: Privasi Data Pelanggan dan Retensi (P2)
+
+### 1. Ringkasan Perbaikan
+Menerapkan kerangka kerja privasi data pelanggan menyeluruh:
+1. Menyusun dokumen inventaris data pribadi kanonik `docs/DATA-PRIVACY.md` yang merinci tabel PII (`orders`, `customer_sessions`, `message_log`, `authorized_numbers`), tujuan, masa retensi, hak subjek data, dan penafian kepatuhan hukum UU PDP.
+2. Membangun utilitas `dashboard/src/lib/security/redact.ts` untuk redaksi nomor telepon dan email sebelum payload dikirim ke LLM Gateway (`redactForLlm`) serta masking log audit (`maskPhone`, `maskChatId`).
+3. Menambahkan pengaturan retensi dan privasi pada `bot_settings` (`customer_data_retention_days` default 365, `ai_form_fallback_requires_paid_model` default false) beserta migrasi forward-only.
+4. Membangun skrip retensi otomatis `scripts/retention.ts` (bawaan `--dry-run`) untuk pembersihan pesan log > 90 hari, sesi inaktif > 90 hari, anonimisasi pesanan lama > 365 hari (menjaga integritas agregat keuangan), dan pembersihan soft-delete > 30 hari.
+5. Membangun skrip penghapusan data atas permintaan `scripts/purge-customer.ts` (Right to be Forgotten) dan mendokumentasikan panduan eksekusi pada `docs/RUNBOOK.md`.
+6. Menambahkan banner peringatan privasi untuk model gratis pada UI Integrasi.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `docs/DATA-PRIVACY.md` | Baru | Dokumen inventaris data pribadi, retensi, hak subjek data, dan penafian hukum. |
+| `dashboard/src/lib/security/redact.ts` | Baru | Utilitas redaksi teks PII untuk LLM (`redactForLlm`) dan penyamaran nomor/chat ID (`maskPhone`, `maskChatId`). |
+| `dashboard/src/lib/security/retention.ts` | Baru | Mesin inti retensi berkala (`runRetention`) dan penghapusan data pelanggan atas permintaan (`purgeCustomerData`). |
+| `dashboard/scripts/retention.ts` & `scripts/retention.ts` | Baru | CLI skrip retensi otomatis dengan mode aman `--dry-run` bawaan dan opsi `--apply`. |
+| `dashboard/scripts/purge-customer.ts` & `scripts/purge-customer.ts` | Baru | CLI skrip penghapusan data pribadi pelanggan berdasarkan nomor atau chat ID. |
+| `dashboard/prisma/schema.prisma` | Modifikasi | Penambahan kolom `customer_data_retention_days` dan `ai_form_fallback_requires_paid_model` pada `BotSettings`. |
+| `dashboard/prisma/migrations/20261105090000_add_privacy_settings_to_bot_settings/migration.sql` | Baru | Migrasi SQL forward-only penambahan kolom pengaturan privasi. |
+| `dashboard/src/app/api/internal/customer/handle/route.ts` | Modifikasi | Penerapan `redactForLlm` pada teks formulir sebelum dikirim ke fallback LLM dan pembatasan model berbayar. |
+| `dashboard/src/app/api/internal/inbound/accept/route.ts` | Modifikasi | Penyamaran nomor telepon dan chat ID pada pencatatan log audit event (`maskPhone`, `maskChatId`). |
+| `dashboard/src/lib/analytics/helpers.ts` | Modifikasi | Re-ekspor fungsi `maskChatId` dan `maskPhone` dari modul kanonik `redact.ts`. |
+| `dashboard/src/lib/waha/humanizer.ts` | Modifikasi | Penerapan `maskChatId` pada seluruh pencatatan event audit WAHA. |
+| `dashboard/src/app/(app)/integrations/IntegrationsPanel.tsx` | Modifikasi | Penambahan banner peringatan privasi untuk penggunaan model gratis. |
+| `docs/RUNBOOK.md` | Modifikasi | Panduan operasional eksekusi skrip `retention.ts` dan `purge-customer.ts`. |
+| `dashboard/tests/unit/privacy-redact.test.ts` | Baru | Pengujian unit fungsi redaksi teks PII dan masking nomor/chat ID. |
+| `dashboard/tests/unit/retention.test.ts` | Baru | Pengujian unit skrip retensi dry-run, apply, dan pembersihan customer data. |
+| `dashboard/tests/unit/reminder-logic.test.ts` | Modifikasi | Penyelarasan mock `dummySettings` dengan kolom baru `BotSettings`. |
+| `dashboard/tests/unit/analytics-helpers.test.ts` | Modifikasi | Penyelarasan pengujian unit `maskChatId` dengan format domain WhatsApp. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S12. |
+
+### 3. Hasil Verifikasi
+1. **Unit Test Suite:** 47 test file, **432 test cases** lulus 100%.
+2. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+3. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+4. **Smoke Test:** `./scripts/smoke.sh` lulus bersih (11 pemeriksaan lulus, 0 kegagalan).
+5. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+6. **Secret Scanner:** `./scripts/check-secrets.sh` lulus bersih (exit code 0).
+
+### 4. Migrasi & Rollback
+- Migrasi: `20261105090000_add_privacy_settings_to_bot_settings` (penambahan kolom `customer_data_retention_days` dan `ai_form_fallback_requires_paid_model`).
+- Rollback Migrasi:
+  ```sql
+  ALTER TABLE "bot_settings" DROP COLUMN IF EXISTS "ai_form_fallback_requires_paid_model";
+  ALTER TABLE "bot_settings" DROP COLUMN IF EXISTS "customer_data_retention_days";
+  ```

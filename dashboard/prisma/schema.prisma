@@ -105,34 +105,36 @@ model AdminUser {
 }
 
 model BotSettings {
-  id                        Int            @id @default(1)
-  brand_name                String         @default("") @db.VarChar(100)
-  business_type             String         @default("") @db.VarChar(100)
-  owner_name                String         @default("") @db.VarChar(100)
-  timezone                  String         @default("Asia/Jakarta") @db.VarChar(50)
-  work_hours_start          String         @default("08:00") @db.VarChar(5)
-  work_hours_end            String         @default("17:00") @db.VarChar(5)
-  early_brief_time          String         @default("06:00") @db.VarChar(5)
-  working_days              Int[]          @default([1, 2, 3, 4, 5, 6])
-  behavior_mode             BehaviorMode   @default(STRICT)
-  behavior_instruction      String?        @db.Text
-  prompt_mode               PromptMode     @default(STACK)
-  custom_prompt_template    String?        @db.Text
-  compiled_prompt           String?        @db.Text
-  compiled_prompt_version   Int            @default(1)
-  compiled_at               DateTime?      @db.Timestamptz
-  reminder_interval_minutes Int            @default(120)
-  reminder_max_per_day      Int            @default(5)
-  reminder_max_rank         Int            @default(2)
-  brief_window_minutes      Int            @default(120)
-  eod_window_minutes        Int            @default(120)
-  default_due_time          String         @default("17:00") @db.VarChar(5)
-  google_sync_mode          GoogleSyncMode @default(AUTO)
-  enable_orders             Boolean        @default(true)
-  bot_enabled               Boolean        @default(true)
-  setup_completed           Boolean        @default(false)
-  created_at                DateTime       @default(now()) @db.Timestamptz
-  updated_at                DateTime       @default(now()) @updatedAt @db.Timestamptz
+  id                                   Int            @id @default(1)
+  brand_name                           String         @default("") @db.VarChar(100)
+  business_type                        String         @default("") @db.VarChar(100)
+  owner_name                           String         @default("") @db.VarChar(100)
+  timezone                             String         @default("Asia/Jakarta") @db.VarChar(50)
+  work_hours_start                     String         @default("08:00") @db.VarChar(5)
+  work_hours_end                       String         @default("17:00") @db.VarChar(5)
+  early_brief_time                     String         @default("06:00") @db.VarChar(5)
+  working_days                         Int[]          @default([1, 2, 3, 4, 5, 6])
+  behavior_mode                        BehaviorMode   @default(STRICT)
+  behavior_instruction                 String?        @db.Text
+  prompt_mode                          PromptMode     @default(STACK)
+  custom_prompt_template               String?        @db.Text
+  compiled_prompt                      String?        @db.Text
+  compiled_prompt_version              Int            @default(1)
+  compiled_at                          DateTime?      @db.Timestamptz
+  reminder_interval_minutes            Int            @default(120)
+  reminder_max_per_day                 Int            @default(5)
+  reminder_max_rank                    Int            @default(2)
+  brief_window_minutes                 Int            @default(120)
+  eod_window_minutes                   Int            @default(120)
+  default_due_time                     String         @default("17:00") @db.VarChar(5)
+  google_sync_mode                     GoogleSyncMode @default(AUTO)
+  enable_orders                        Boolean        @default(true)
+  bot_enabled                          Boolean        @default(true)
+  setup_completed                      Boolean        @default(false)
+  customer_data_retention_days         Int            @default(365)
+  ai_form_fallback_requires_paid_model Boolean        @default(false)
+  created_at                           DateTime       @default(now()) @db.Timestamptz
+  updated_at                           DateTime       @default(now()) @updatedAt @db.Timestamptz
 
   @@map("bot_settings")
 }

@@ -1,0 +1,1 @@
+../dashboard/scripts/purge-customer.ts

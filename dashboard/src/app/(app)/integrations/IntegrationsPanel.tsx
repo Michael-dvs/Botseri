@@ -563,13 +563,20 @@ export function IntegrationsPanel({
           </div>
         </div>
 
-        {/* Peringatan model gratis tanpa fallback */}
-        {activeConfig?.model.includes(":free") && !configs.some((c) => c.is_fallback) && (
+        {/* Peringatan model gratis: Fallback & Privasi */}
+        {activeConfig?.model.includes(":free") && (
           <div
             role="alert"
-            className="mt-4 rounded border border-amber-300 bg-amber-50 p-4 text-xs text-amber-900"
+            className="mt-4 rounded border border-amber-300 bg-amber-50 p-4 text-xs text-amber-900 flex flex-col gap-1.5"
           >
-            <strong>Perhatian:</strong> Model aktif utama menggunakan tier gratis ({activeConfig.model}) dan belum ada model cadangan (fallback) yang dikonfigurasi. Disarankan mengaktifkan model cadangan untuk menghindari kegagalan saat terkena rate limit.
+            <div>
+              <strong>Pemberitahuan Privasi:</strong> Model aktif menggunakan kuota/tier gratis ({activeConfig.model}). Pastikan kebijakan pemrosesan data penyedia pihak ketiga selaras dengan standar privasi usaha Anda.
+            </div>
+            {!configs.some((c) => c.is_fallback) && (
+              <div className="text-amber-800">
+                <strong>Peringatan Keandalan:</strong> Belum ada model cadangan (fallback) yang dikonfigurasi. Disarankan mengaktifkan model cadangan untuk menghindari kegagalan saat terkena rate limit.
+              </div>
+            )}
           </div>
         )}
 

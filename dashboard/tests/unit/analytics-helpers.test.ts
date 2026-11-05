@@ -136,9 +136,9 @@ describe("tickHealth", () => {
 });
 
 describe("maskChatId", () => {
-  it("menyembunyikan karakter selain 4 karakter terakhir", () => {
-    expect(maskChatId("6281234567890@c.us")).toBe("**************c.us");
-    expect(maskChatId("628123456789")).toBe("********6789");
+  it("menyamarkan nomor sebelum domain chat id", () => {
+    expect(maskChatId("6281234567890@c.us")).toBe("62812****7890@c.us");
+    expect(maskChatId("120363025000000000@g.us")).toBe("120363025000000000@g.us");
   });
 
   it("mempertahankan nilai jika panjangnya kurang atau sama dengan 4", () => {

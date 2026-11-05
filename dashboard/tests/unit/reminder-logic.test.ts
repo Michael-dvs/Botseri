@@ -32,6 +32,8 @@ describe("Strict Separation of Deadline (due_at) vs Reminder Alarm (remind_at)",
     bot_enabled: true,
     setup_completed: true,
     enable_orders: true,
+    customer_data_retention_days: 365,
+    ai_form_fallback_requires_paid_model: false,
     created_at: new Date(),
     updated_at: new Date(),
   };

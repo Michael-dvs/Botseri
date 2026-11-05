@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { prisma } from "@/lib/db";
 import { recordEvent } from "@/lib/events";
+import { maskChatId } from "@/lib/security/redact";
 import {
   sendSeen,
   sendTextDirect,
@@ -178,7 +179,7 @@ async function checkRateLimits(chatId: string, priority: 0 | 1 | 2): Promise<voi
       "waha.antiban",
       "WAHA_RATE_LIMIT_BLOCKED",
       {
-        chat_id: chatId,
+        chat_id: maskChatId(chatId),
         priority,
         count_60s: count60s,
         count_60m: count60m,
@@ -204,7 +205,7 @@ async function checkRateLimits(chatId: string, priority: 0 | 1 | 2): Promise<voi
     });
     if (customerOutboundCount >= 12) {
       await recordEvent("WARN", "waha.antiban", "CUSTOMER_HOURLY_LIMIT_BLOCKED", {
-        chat_id: chatId,
+        chat_id: maskChatId(chatId),
         count: customerOutboundCount,
       });
       throw new HumanizerError(
@@ -268,7 +269,7 @@ async function handleCircuitFailure(
       "waha.antiban",
       "WAHA_CIRCUIT_BREAKER_TRIPPED",
       {
-        chat_id: chatId,
+        chat_id: maskChatId(chatId),
         consecutive_failures: consecutiveFailures,
         is_restriction_error: isBanned,
         cooldown_minutes: 30,
@@ -458,7 +459,7 @@ async function processQueue(): Promise<void> {
       // Pembersihan Pesan Basi (P2 TTL Guard: 120 detik)
       if (item.priority === 2 && Date.now() - item.enqueuedAt > 120_000) {
         await recordEvent("WARN", "waha.queue", "WAHA_QUEUE_EXPIRED", {
-          chat_id: item.opts.chatId,
+          chat_id: maskChatId(item.opts.chatId),
           enqueued_at: item.enqueuedAt,
           trigger: item.opts.trigger,
         });

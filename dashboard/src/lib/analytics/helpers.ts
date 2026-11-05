@@ -98,13 +98,7 @@ export function tickHealth(
   return "STALE";
 }
 
-export function maskChatId(chatId: string): string {
-  if (!chatId) return "";
-  if (chatId.length <= 4) return chatId;
-  const visible = chatId.slice(-4);
-  const masked = "*".repeat(chatId.length - 4);
-  return `${masked}${visible}`;
-}
+export { maskChatId, maskPhone } from "@/lib/security/redact";
 
 export function truncateMessage(
   text: string | null | undefined,

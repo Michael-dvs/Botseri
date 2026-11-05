@@ -268,6 +268,27 @@ Pesanan yang dihapus oleh owner melalui tool atau dashboard masuk ke status soft
    npx tsx scripts/purge-deleted-orders.ts
    ```
 
+### 7.4 Skrip Retensi Otomatis (`scripts/retention.ts`)
+Skrip ini mengeksekusi kebijakan retensi berkala untuk membersihkan log pesan > 90 hari, sesi inaktif > 90 hari, menganonimkan PII pesanan lama > 365 hari, dan membersihkan pesanan soft-delete > 30 hari:
+
+```bash
+# 1. Jalankan simulasi aman (dry-run bawaan)
+npx tsx scripts/retention.ts
+
+# 2. Eksekusi nyata (wajib backup terlebih dahulu)
+./scripts/backup.sh
+npx tsx scripts/retention.ts --apply
+```
+
+### 7.5 Penghapusan Data Pelanggan atas Permintaan (`scripts/purge-customer.ts`)
+Jika pelanggan meminta hak penghapusan data pribadi (Right to be Forgotten):
+
+```bash
+./scripts/backup.sh
+npx tsx scripts/purge-customer.ts <nomor_telepon_atau_chat_id>
+```
+Skrip ini akan secara atomik menghapus sesi percakapan, menghapus pesan log terkait, dan menganonimkan data identitas pada pesanan terkait.
+
 ---
 ## 8. Proteksi Cloudflare Tunnel dan Keamanan Jaringan
 

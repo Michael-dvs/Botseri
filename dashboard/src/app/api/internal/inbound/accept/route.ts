@@ -8,6 +8,7 @@ import { PAIRING_PATTERN, pairingHash } from "@/lib/pairing";
 import { resolveSenderE164, isLidSender, getLidIdentifier } from "@/lib/phone";
 import { lookupLidContact } from "@/lib/waha/client";
 import { normalizePhoneE164 } from "@/lib/customer/phone";
+import { maskChatId, maskPhone } from "@/lib/security/redact";
 import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
 import { looksLikeOrderForm } from "@/lib/customer/orderFormat";
 import { getActivePipelineConfig } from "@/lib/pipeline/manager";
@@ -572,8 +573,8 @@ export async function POST(request: Request) {
     }
 
     await recordEvent("WARN", "inbound", "INBOUND_HOURLY_LIMIT", {
-      chat_id: targetChatId,
-      phone_e164: validCustomerPhone,
+      chat_id: maskChatId(targetChatId),
+      phone_e164: maskPhone(validCustomerPhone),
       count: hourlyInboundCount,
     });
     return response(false, "INBOUND_HOURLY_LIMIT", null, targetChatId);
