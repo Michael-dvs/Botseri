@@ -714,6 +714,11 @@ export function PipelineStudio({
 
   const validation = useMemo(() => validateGraph(currentGraph), [currentGraph]);
 
+  // Memoize error signature as a primitive string to avoid recreating Map on identical errors
+  const errorSignature = useMemo(() => {
+    return validation.errors.map((e) => `${e.nodeId || ""}:${e.code}:${e.message}`).join("|");
+  }, [validation.errors]);
+
   const errorNodeIdMap = useMemo(() => {
     const map = new Map<string, string>();
     for (const err of validation.errors) {
@@ -722,16 +727,20 @@ export function PipelineStudio({
       }
     }
     return map;
-  }, [validation.errors]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [errorSignature]);
 
+  // Apply validation error states to nodes only when values genuinely change
   useEffect(() => {
-    setNodes((nds) =>
-      nds.map((n) => {
+    setNodes((nds) => {
+      let hasChanges = false;
+      const nextNodes = nds.map((n) => {
         const err = errorNodeIdMap.get(n.id);
         const hasErr = Boolean(err);
         if (n.data.hasError === hasErr && n.data.errorMessage === err) {
           return n;
         }
+        hasChanges = true;
         return {
           ...n,
           data: {
@@ -740,8 +749,9 @@ export function PipelineStudio({
             errorMessage: err,
           },
         };
-      })
-    );
+      });
+      return hasChanges ? nextNodes : nds;
+    });
   }, [errorNodeIdMap, setNodes]);
 
   // Simulation state

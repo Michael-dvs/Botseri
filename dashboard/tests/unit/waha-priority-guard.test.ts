@@ -301,4 +301,30 @@ describe("S09: WAHA Priority Queue, Rate Limit Reservation, Breaker Persistence,
       expect(statusAfter.status).toBe("NORMAL");
     });
   });
+
+  describe("7. Uji Kompatibilitas Runtime Node.js < 22 (Ponyfill Deferred Promise)", () => {
+    it("sendHumanizedMessage berhasil mengeksekusi antrean meskipun Promise.withResolvers undefined", async () => {
+      const originalWithResolvers = (Promise as unknown as Record<string, unknown>).withResolvers;
+      try {
+        delete (Promise as unknown as Record<string, unknown>).withResolvers;
+        sendTextDirectMock.mockResolvedValueOnce({
+          ok: true,
+          text: async () => JSON.stringify({ id: "msg-123" }),
+        });
+        const res = await sendHumanizedMessage({
+          chatId: "628123456789@c.us",
+          text: "Uji coba kompatibilitas Node 20",
+          trigger: "CHAT_MASUK",
+          skipDelay: true,
+        });
+
+        expect(res.ok).toBe(true);
+        expect(sendTextDirectMock).toHaveBeenCalledWith("628123456789@c.us", "Uji coba kompatibilitas Node 20", undefined);
+      } finally {
+        if (originalWithResolvers) {
+          (Promise as unknown as Record<string, unknown>).withResolvers = originalWithResolvers;
+        }
+      }
+    });
+  });
 });

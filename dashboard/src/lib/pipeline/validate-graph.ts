@@ -247,7 +247,10 @@ export function validateGraph(graph: PipelineGraph): ValidationResult {
   }
   for (const edge of edges) {
     if (nodeMap.has(edge.source) && nodeMap.has(edge.target)) {
-      adj.get(edge.source)?.push(edge.target);
+      const list = adj.get(edge.source);
+      if (list && !list.includes(edge.target)) {
+        list.push(edge.target);
+      }
     }
   }
 
@@ -284,7 +287,6 @@ export function validateGraph(graph: PipelineGraph): ValidationResult {
       }
     }
   }
-
   if (hasCycle) {
     errors.push({
       code: "GRAPH_CYCLIC",
@@ -294,8 +296,9 @@ export function validateGraph(graph: PipelineGraph): ValidationResult {
 
   // 6. Validasi Kedalaman Rantai Maksimal 3 Hop Balasan
   function checkChainDepth(currId: string, depth: number, visitedPath: Set<string>): number {
-    if (depth > 3) return depth;
+    if (depth > 3 || visitedPath.size > nodes.length) return depth;
     const neighbors = adj.get(currId) || [];
+    if (neighbors.length === 0) return depth;
     let maxSubDepth = depth;
 
     for (const nextId of neighbors) {
@@ -314,7 +317,8 @@ export function validateGraph(graph: PipelineGraph): ValidationResult {
   }
 
   const triggerNode = nodes.find((n) => n.type === "TRIGGER_INBOUND");
-  if (triggerNode) {
+  // Jalankan perhitungan kedalaman rantai hanya jika graf bebas siklus tak terhingga
+  if (!hasCycle && triggerNode) {
     const maxChain = checkChainDepth(triggerNode.id, 0, new Set([triggerNode.id]));
     if (maxChain > 3) {
       errors.push({
@@ -332,7 +336,8 @@ export function validateGraph(graph: PipelineGraph): ValidationResult {
 
     while (queue.length > 0) {
       const curr = queue.shift()!;
-      for (const next of adj.get(curr) || []) {
+      const neighbors = adj.get(curr) || [];
+      for (const next of neighbors) {
         if (!reachable.has(next)) {
           reachable.add(next);
           queue.push(next);

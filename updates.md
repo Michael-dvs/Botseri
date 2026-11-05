@@ -20,6 +20,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] S13: Staging, Test Integrasi, & Evaluasi Prompt](#2026-11-05-s13-staging-test-integrasi-dan-evaluasi-prompt-p2)
 - [[2026-11-05] S14: Dokumentasi, Operasional, & Penutupan Utang Lama](#2026-11-05-s14-dokumentasi-operasional-dan-penutupan-utang-lama-p2)
 - [[2026-11-05] S15: Akseptansi Akhir & Penutupan Patch Plan](#2026-11-05-s15-akseptansi-akhir-dan-penutupan-patch-plan)
+- [[2026-11-05] Hotfix: Kompatibilitas Promise Antrean WAHA & Pencegahan Hang Studio Alur](#2026-11-05-hotfix-kompatibilitas-promise-antrean-waha--pencegahan-hang-studio-alur)
 
 ---
 
@@ -1940,3 +1941,38 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 5. Known Issues / Catatan Operasional
 - Seluruh tindakan manual yang memerlukan perangkat fisik WhatsApp atau akun eksternal owner telah dipusatkan pada Bagian 4 dokumen `docs/reports/patch-final-report.md` dan `docs/reports/step-07-closure-checklist.md`.
+
+## [2026-11-05] Hotfix: Kompatibilitas Promise Antrean WAHA & Pencegahan Hang Studio Alur
+
+### 1. Ringkasan Pekerjaan
+1. **Ponyfill Kompatibilitas Node.js 20 (`createDeferredPromise`):**
+   - Membangun utilitas `dashboard/src/lib/utils/promise.ts` yang menyediakan fungsi `createDeferredPromise<T>()` untuk menggantikan ketergantungan API Node.js 22+ (`Promise.withResolvers`).
+   - Mengganti seluruh pemanggilan `Promise.withResolvers` di `humanizer.ts` (antrean prioritas WAHA) dan `tick.ts` (timeout kalender).
+   - Menambahkan pengujian unit pada `waha-priority-guard.test.ts` untuk memastikan antrean prioritas berjalan mulus saat `Promise.withResolvers` tidak terdefinisi.
+2. **Pencegahan Infinite Re-render Loop & Browser Freeze di Studio Alur:**
+   - Memperbaiki re-render tak berujung pada `PipelineStudio.tsx` dengan memoisasi `errorSignature` sebagai string primitif dan mengembalikan referensi `nds` lama jika tidak ada perubahan error status pada node.
+   - Memperkuat penelusuran DFS cycle detection di `validate-graph.ts` dengan deduplikasi tetangga simpul (`adj` list) dan penjagaan rekursi kedalaman rantai pesan hanya saat graf bebas siklus tak terhingga.
+3. **Ketahanan SSR Halaman Studio Alur:**
+   - Membungkus pembacaan database pada `dashboard/src/app/(app)/pipeline/page.tsx` dengan blok try/catch defensif dan memberikan fallback preset default valid jika database/parsing mengalami kegagalan, mencegah Error Boundary terpicu saat refresh.
+
+### 2. Commit Git
+- Commit format: `fix: perbaiki kompatibilitas promise antrean waha dan cegah browser hang studio alur kerja`
+
+### 3. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada hotfix ini.
+
+### 4. Bukti Verifikasi
+1. **Unit Test Suite:** `npm test -- --run` · 49 test files, 441 test cases passed (100% lulus, exit code 0).
+2. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% lulus, exit code 0).
+3. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · 30 passed (100% lulus, exit code 0).
+4. **TypeScript Typecheck:** `npx tsc --noEmit` · Lulus bersih (0 error).
+5. **ESLint:** `npm run lint` · Lulus bersih (0 warning, 0 error).
+6. **Next.js Standalone Build:** `npm run build` · 27 rute berhasil dikompilasi (exit code 0).
+7. **Workflow Validation:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+8. **Secret Scanner:** `./scripts/check-secrets.sh` · 0 secret terekspos (exit code 0).
+9. **Smoke Test:** `./scripts/smoke.sh` · 14/14 titik pemeriksaan lulus (14/14 PASS, exit code 0).
+10. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 5. Known Issues / Catatan Operasional
+- Seluruh proses deferred promise kini 100% kompatibel dengan Node.js versi 18, 20, dan 22+.
+- Halaman Studio Alur (`/pipeline`) kini dapat dinavigasi ke halaman lain secara instan tanpa membebani CPU browser.

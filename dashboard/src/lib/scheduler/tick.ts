@@ -1,6 +1,7 @@
 import { Prisma, type BotSettings, type JobType } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { recordEvent } from "@/lib/events";
+import { createDeferredPromise } from "@/lib/utils/promise";
 import { listCalendarEventsToday, type CalendarEventSummary } from "@/lib/google/calendar";
 import { retryPendingGoogleSync, syncTodo } from "@/lib/google/sync";
 import { renderPrompt } from "@/lib/prompt/render";
@@ -225,7 +226,7 @@ async function buildBrief(
   const expiredAlarms = expiredRows.map((r) => r.title);
   let events: CalendarEventSummary[] = [];
   try {
-    const { promise: calendarTimeout, reject } = Promise.withResolvers<CalendarEventSummary[]>();
+    const { promise: calendarTimeout, reject } = createDeferredPromise<CalendarEventSummary[]>();
     const t = setTimeout(() => reject(new Error("Google Calendar timeout (20s)")), 20_000);
     if (typeof t.unref === "function") t.unref();
     events = await Promise.race([

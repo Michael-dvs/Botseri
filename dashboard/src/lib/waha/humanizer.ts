@@ -2,6 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { prisma } from "@/lib/db";
 import { recordEvent } from "@/lib/events";
 import { maskChatId } from "@/lib/security/redact";
+import { createDeferredPromise } from "@/lib/utils/promise";
 import {
   sendSeen,
   sendTextDirect,
@@ -489,7 +490,7 @@ async function processQueue(): Promise<void> {
 export function sendHumanizedMessage(
   opts: HumanizeOptions,
 ): Promise<{ ok: boolean; response: unknown; skipped?: boolean }> {
-  const { promise, resolve, reject } = Promise.withResolvers<{
+  const { promise, resolve, reject } = createDeferredPromise<{
     ok: boolean;
     response: unknown;
     skipped?: boolean;
