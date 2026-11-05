@@ -6,7 +6,7 @@
     "executionOrder": "v1",
     "saveManualExecutions": false,
     "saveDataErrorExecution": "all",
-    "executionTimeout": 120
+    "executionTimeout": 60
   },
   "nodes": [
     {
@@ -418,8 +418,8 @@
           "baseURL": "={{ $env.DASHBOARD_URL || 'http://botseri-dashboard:3000' }}/api/internal/llm/v1",
           "temperature": 0.2,
           "maxTokens": 2048,
-          "timeout": 45000,
-          "maxRetries": 1
+          "timeout": 30000,
+          "maxRetries": 0
         }
       },
       "credentials": {
@@ -901,11 +901,12 @@
                 },
                 "conditions": [
                   {
-                    "leftValue": "={{ $json.role || 'OWNER' }}",
-                    "rightValue": "OWNER",
+                    "leftValue": "={{ Boolean(($json.role === 'OWNER' || $json.role === 'owner') && $json.is_owner === true) }}",
+                    "rightValue": true,
                     "operator": {
-                      "type": "string",
-                      "operation": "equals"
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
                     }
                   }
                 ],
@@ -922,11 +923,12 @@
                 },
                 "conditions": [
                   {
-                    "leftValue": "={{ $json.role }}",
-                    "rightValue": "CUSTOMER",
+                    "leftValue": "={{ Boolean($json.role === 'CUSTOMER' || $json.role === 'customer' || $json.is_owner === false || $json.role !== 'OWNER') }}",
+                    "rightValue": true,
                     "operator": {
-                      "type": "string",
-                      "operation": "equals"
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
                     }
                   }
                 ],

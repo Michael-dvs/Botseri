@@ -24,6 +24,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Perbaikan Sub-Menu Chaining (Pilihan 3), Guard Sapaan Awal, & Handler Fallback Input](#2026-11-05-perbaikan-sub-menu-chaining-pilihan-3-guard-sapaan-awal--handler-fallback-input)
 - [[2026-11-05] Perbaikan Penyimpanan current_router_id, Auto-Resolve Root Router, & Eliminasi Silent Drops](#2026-11-05-perbaikan-penyimpanan-current_router_id-auto-resolve-root-router--eliminasi-silent-drops)
 - [[2026-11-05] Hotfix Kritis: Eliminasi Silent Drops & Jaminan Eksekusi Fallback customer/handle](#2026-11-05-hotfix-kritis-eliminasi-silent-drops--jaminan-eksekusi-fallback-customerhandle)
+- [[2026-11-05] Hotfix: Pembatasan Timeout LangChain n8n & Isolasi Ketat Inbound Pelanggan](#2026-11-05-hotfix-pembatasan-timeout-langchain-n8n--isolasi-ketat-inbound-pelanggan)
 
 ---
 
@@ -2104,4 +2105,41 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 5. Known Issues / Catatan Operasional
 - Endpoint `/api/internal/customer/handle` kini dijamin 100% selalu mengembalikan array `replies` terisi untuk n8n dan tidak pernah melempar HTTP 500 pada chat interaktif pelanggan.
+
+## [2026-11-05] Hotfix: Pembatasan Timeout LangChain n8n & Isolasi Ketat Inbound Pelanggan
+
+### 1. Ringkasan Pekerjaan
+1. **Pembatasan Timeout Model Bahasa LangChain (Maksimal 30 Detik):**
+   - Pada workflow `n8n-engine/workflows/botseri-inbound-agent.json`, mengatur properti `timeout: 30000` (30 detik, bukan default 300 detik) dan `maxRetries: 0` pada node `Botseri Gateway` (`lmChatOpenAi`).
+   - Membatasi batas waktu eksekusi tingkat workflow `executionTimeout: 60` pada pengaturan n8n untuk mencegah hanging 5 menit jika terjadi kendala jaringan internal.
+   - Memastikan parameter URL kredensial internal gateway mengarah ke `http://botseri-dashboard:3000/api/internal/llm/v1`.
+2. **Penegasan Isolasi Ketat Percabangan Peran (Switch Role):**
+   - Memperbarui aturan pada node `Switch Role` agar hanya meneruskan ke sub-graf AI Agent jika `$json.is_owner === true` DAN `$json.role === 'OWNER'`.
+   - Menjamin seluruh pesan pelanggan (`$json.role === 'CUSTOMER'` atau `$json.is_owner === false` atau peran selain owner) WAJIB mengalir hanya ke `Customer Handle` (`POST /api/internal/customer/handle`) -> `Split Out Replies` -> `Kirim WhatsApp`.
+   - Menambahkan properti eksplisit `is_owner: role === "OWNER"` pada fungsi helper respon di `dashboard/src/app/api/internal/inbound/accept/route.ts`.
+3. **Deploy Ulang Workflow ke Runtime n8n:**
+   - Mengimpor ulang berkas workflow yang telah diperbarui ke kontainer n8n aktif via `n8n import:workflow`.
+   - Mengaktifkan kembali workflow dengan `n8n update:workflow --all --active=true` dan me-restart kontainer `botseri-n8n`.
+
+### 2. Commit Git
+- Commit format: `fix: batasi timeout langchain n8n dan tegaskan isolasi switch inbound pelanggan`
+
+### 3. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada perbaikan ini.
+
+### 4. Bukti Verifikasi
+1. **Validasi Workflow n8n:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+2. **JSON Syntax Verification:** `node -e "JSON.parse(fs.readFileSync(...))"` · Valid JSON.
+3. **Runtime Import & Start:** Kontainer `botseri-n8n` sukses memuat dan memulai ulang workflow `botseriInboundAgent01` dan `botseriScheduler01`.
+4. **Unit Test Suite Lengkap:** `npm test -- --run` · 50 test files, 454 test cases passed (100% lulus, exit code 0).
+5. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% lulus, exit code 0).
+6. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · 30 passed (100% lulus, exit code 0).
+7. **TypeScript Typecheck & ESLint:** `npx tsc --noEmit` dan `npm run lint` · 0 error, 0 warning.
+8. **Next.js Standalone Build:** `npm run build` · 27 rute berhasil dikompilasi (exit code 0).
+9. **Secret Scanner:** `./scripts/check-secrets.sh` · 0 secret terekspos (exit code 0).
+10. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (14/14 PASS, exit code 0).
+11. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 5. Known Issues / Catatan Operasional
+- Pesan pelanggan dijamin terisolasi 100% dan tidak pernah mencapai sub-graf LangChain AI Agent.
 

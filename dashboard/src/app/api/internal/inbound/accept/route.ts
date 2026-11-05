@@ -60,6 +60,7 @@ function response(
     chat_id: chatId,
     reply_to_chat_id: chatId,
     reply_text: replyText,
+    is_owner: role === "OWNER",
     ...(triggerType ? { trigger_type: triggerType } : {}),
     ...(role ? { role } : {}),
     ...(customerPhone ? { customer_phone: customerPhone } : {}),
