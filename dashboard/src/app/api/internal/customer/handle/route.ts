@@ -246,20 +246,34 @@ export async function POST(request: Request) {
       }
 
       if (!routerNode) {
-        const greetingEdge = pipeline.config.graph.edges.find(
-          (e) => (e.source === "node-greeting" || e.source.includes("greeting")) && (e.sourceHandle === "out_next" || !e.sourceHandle)
+        const explicitRootRouter = pipeline.config.graph.nodes.find(
+          (n) => (n.id === "node-router" || n.id === "root-router") && n.type === "CONDITION_ROUTER"
         );
-        if (greetingEdge) {
-          routerNode = pipeline.config.graph.nodes.find(
-            (n) => n.id === greetingEdge.target && n.type === "CONDITION_ROUTER"
-          );
+        if (explicitRootRouter) {
+          routerNode = explicitRootRouter;
         }
       }
 
       if (!routerNode) {
-        routerNode = pipeline.config.graph.nodes.find(
-          (n) => n.id === "node-router" || n.type === "CONDITION_ROUTER"
+        const triggerNode = pipeline.config.graph.nodes.find(
+          (n) => n.type === "TRIGGER_INBOUND" || n.id === "node-trigger"
         );
+        const customerEdge = triggerNode
+          ? pipeline.config.graph.edges.find(
+              (e) => e.source === triggerNode.id && (e.sourceHandle === "out_customer" || !e.sourceHandle)
+            )
+          : undefined;
+        const initialGreeting =
+          (customerEdge ? pipeline.config.graph.nodes.find((n) => n.id === customerEdge.target) : undefined) ||
+          pipeline.config.graph.nodes.find((n) => n.id === "node-greeting");
+
+        if (initialGreeting) {
+          routerNode = findDownstreamRouter(initialGreeting.id, pipeline.config.graph);
+        }
+      }
+
+      if (!routerNode) {
+        routerNode = pipeline.config.graph.nodes.find((n) => n.type === "CONDITION_ROUTER");
       }
 
       if (isStalePointer && activeRouterId) {
@@ -284,17 +298,21 @@ export async function POST(request: Request) {
         ? (routerData.branches as Array<{ id: string; label: string; keywords: string[] }>)
         : null;
 
-      const lowerMsg = message_text.toLowerCase().trim();
+      const cleanInput = message_text.trim().toLowerCase();
 
       if (branches) {
         // 1. Check custom branches first (e.g. branch_3, branch_4)
         for (const branch of branches) {
           if (branch.id === "branch_1" || branch.id === "branch_2") continue;
-          const isMatch = Array.isArray(branch.keywords) && branch.keywords.some((kw) => {
-            const cleanKw = String(kw).toLowerCase().trim();
-            if (!cleanKw) return false;
-            return lowerMsg === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(lowerMsg);
-          });
+          const isBranch3 = branch.id === "branch_3" || branch.id.includes("catalog") || branch.id.includes("katalog");
+          const branchKeywords = Array.isArray(branch.keywords) ? branch.keywords : [];
+          const isMatch =
+            (isBranch3 && cleanInput === "3") ||
+            branchKeywords.some((kw) => {
+              const cleanKw = String(kw).toLowerCase().trim();
+              if (!cleanKw) return false;
+              return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+            });
 
           if (isMatch) {
             const branchEdge = pipeline.config.graph.edges.find(
@@ -391,11 +409,13 @@ export async function POST(request: Request) {
         const b1Keywords = Array.isArray(b1?.keywords)
           ? b1.keywords
           : greetingConf.order_trigger_keywords;
-        const isB1Match = b1Keywords.some((kw) => {
-          const cleanKw = String(kw).toLowerCase().trim();
-          if (!cleanKw) return false;
-          return lowerMsg === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(lowerMsg);
-        });
+        const isB1Match =
+          cleanInput === "1" ||
+          b1Keywords.some((kw) => {
+            const cleanKw = String(kw).toLowerCase().trim();
+            if (!cleanKw) return false;
+            return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+          });
 
         if (isB1Match) {
           const b1Edge = pipeline.config.graph.edges.find(
@@ -451,11 +471,13 @@ export async function POST(request: Request) {
         const b2Keywords = Array.isArray(b2?.keywords)
           ? b2.keywords
           : greetingConf.ask_trigger_keywords;
-        const isB2Match = b2Keywords.some((kw) => {
-          const cleanKw = String(kw).toLowerCase().trim();
-          if (!cleanKw) return false;
-          return lowerMsg === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(lowerMsg);
-        });
+        const isB2Match =
+          cleanInput === "2" ||
+          b2Keywords.some((kw) => {
+            const cleanKw = String(kw).toLowerCase().trim();
+            if (!cleanKw) return false;
+            return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+          });
 
         if (isB2Match) {
           const b2Edge = pipeline.config.graph.edges.find(
@@ -570,7 +592,7 @@ export async function POST(request: Request) {
           const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
           fallbackReplyText =
             routerFallbackText ||
-            "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka atau pilihan yang tertera pada menu di atas ya Kak.";
+            "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai pilihan menu ya Kak.";
         }
 
         replies.push({
@@ -640,6 +662,8 @@ export async function POST(request: Request) {
       }
 
       let greetingText = greetingConf.enabled ? (greetingConf.greeting_text || T1_GREETING) : T1_GREETING;
+      let initialRouterId: string | null = null;
+
       if (pipeline.config.graph?.nodes && pipeline.config.graph?.edges) {
         const triggerNode =
           pipeline.config.graph.nodes.find((n) => n.type === "TRIGGER_INBOUND" || n.id === "node-trigger") ||
@@ -660,6 +684,19 @@ export async function POST(request: Request) {
           if (extracted) {
             greetingText = extracted;
           }
+          const downstream = findDownstreamRouter(initialGreetingNode.id, pipeline.config.graph);
+          if (downstream) {
+            initialRouterId = downstream.id;
+          }
+        }
+
+        if (!initialRouterId) {
+          const firstRouter = pipeline.config.graph.nodes.find(
+            (n) => n.type === "CONDITION_ROUTER" || n.id === "node-router"
+          );
+          if (firstRouter) {
+            initialRouterId = firstRouter.id;
+          }
         }
       }
 
@@ -673,6 +710,29 @@ export async function POST(request: Request) {
       });
       stateAfter = "AWAITING_CHOICE";
       nextRetryCount = 0;
+
+      const initMetadata: Prisma.InputJsonValue = {
+        ...meta,
+        current_router_id: initialRouterId,
+        retry_count: 0,
+        last_message_id: message_id || (meta.last_message_id as string | null) || null,
+      };
+
+      await prisma.customerSession.updateMany({
+        where: { id: session.id, state: stateBefore },
+        data: {
+          state: "AWAITING_CHOICE",
+          last_message_at: new Date(),
+          metadata: initMetadata,
+        },
+      });
+
+      return NextResponse.json({
+        ok: true,
+        state_before: stateBefore,
+        state_after: "AWAITING_CHOICE",
+        replies,
+      });
     } else if (transResult.action === "SEND_ORDER_FORM") {
       const formText = formConf.enabled ? (formConf.form_template_text || T2_ORDER_FORM) : T2_ORDER_FORM;
       replies.push({
@@ -1004,9 +1064,8 @@ export async function POST(request: Request) {
       );
       const routerData = (routerNode?.data as Record<string, unknown>) || {};
       const fallbackText =
-        (routerData.fallback_reply_text as string) ||
-        greetingConf.unrecognized_choice_text ||
-        "Mohon maaf Kak, kami belum menangkap pilihannya. Silakan balas sesuai opsi menu yang tersedia ya Kak.";
+        (routerData.fallback_reply_text as string)?.trim() ||
+        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai pilihan menu ya Kak.";
 
       replies.push({
         to: customer_phone,

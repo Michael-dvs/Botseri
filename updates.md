@@ -22,6 +22,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] S15: Akseptansi Akhir & Penutupan Patch Plan](#2026-11-05-s15-akseptansi-akhir-dan-penutupan-patch-plan)
 - [[2026-11-05] Hotfix: Kompatibilitas Promise Antrean WAHA & Pencegahan Hang Studio Alur](#2026-11-05-hotfix-kompatibilitas-promise-antrean-waha--pencegahan-hang-studio-alur)
 - [[2026-11-05] Perbaikan Sub-Menu Chaining (Pilihan 3), Guard Sapaan Awal, & Handler Fallback Input](#2026-11-05-perbaikan-sub-menu-chaining-pilihan-3-guard-sapaan-awal--handler-fallback-input)
+- [[2026-11-05] Perbaikan Penyimpanan current_router_id, Auto-Resolve Root Router, & Eliminasi Silent Drops](#2026-11-05-perbaikan-penyimpanan-current_router_id-auto-resolve-root-router--eliminasi-silent-drops)
 
 ---
 
@@ -2017,4 +2018,53 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 5. Known Issues / Catatan Operasional
 - Seluruh navigasi percabangan bertingkat (root router -> sub-menu -> sub-router -> order form) kini terekam secara konsisten di kolom `metadata.current_router_id` pada tabel `customer_sessions`.
+
+## [2026-11-05] Perbaikan Penyimpanan current_router_id, Auto-Resolve Root Router, & Eliminasi Silent Drops
+
+### 1. Ringkasan Pekerjaan
+1. **Penyimpanan Eksplisit `current_router_id` pada Transisi INIT:**
+   - Pada saat sesi pelanggan baru memproses chat pertama (`state === 'INIT'`), sistem secara otomatis melacak edge keluar dari node sapaan awal (`node-greeting`) untuk menemukan router utama (`node-router`).
+   - Nilai `current_router_id` wajib disimpan ke dalam `customer_sessions.metadata` saat transisi ke `AWAITING_CHOICE`, menghilangkan kondisi di mana `metadata.current_router_id` kosong/undefined di database.
+2. **Auto-Resolve Root Router (Self-Healing):**
+   - Jika `current_router_id` pada metadata sesi bernilai undefined, null, atau tidak ditemukan di graf, sistem secara otomatis:
+     a) Mencari simpul router dengan ID `node-router` atau `root-router`.
+     b) Menelusuri router yang terhubung dari kabel keluar `node-greeting`.
+     c) Mengambil simpul `CONDITION_ROUTER` pertama di graf sebagai jaring pengaman terakhir.
+   - Sesi yang hilang pointer secara otomatis pulih tanpa menimbulkan kegagalan routing atau silent drop.
+3. **Normalisasi Pencocokan Kata Kunci (Toleran Format):**
+   - Input teks dibersihkan dengan `trim().toLowerCase()`.
+   - Pilihan 1: Cocok jika input persis '1' atau kata kunci memuat 'pesan', 'order', 'beli'.
+   - Pilihan 2: Cocok jika input persis '2' atau kata kunci memuat 'tanya', 'konsultasi', 'cs', 'admin'.
+   - Pilihan 3: Cocok jika input persis '3' atau kata kunci memuat 'katalog', 'lihat', 'menu', 'pricelist'.
+4. **Penanganan Fallback Input Tidak Dikenal & Eliminasi Silent Drop:**
+   - Jika pelanggan mengirim input di luar pilihan (misal '4', 'halo', 'tes'):
+     a) Jika port 'fallback' pada router aktif terhubung ke suatu simpul, simpul tersebut dieksekusi.
+     b) Jika port fallback tidak terhubung / kosong, sistem WAJIB mengirim balasan deterministik:
+        `"Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai pilihan menu ya Kak."`
+     c) Status sesi dipertahankan `AWAITING_CHOICE` dan `current_router_id` tetap mengunci router aktif saat ini (tidak me-reset ke sapaan awal).
+   - Ditambahkan jaring pengaman pertahanan mutlak di akhir handler: jika `replies` kosong pada status non-silent, sistem otomatis mengembalikan pesan fallback, mengeliminasi silent drop 100%.
+
+### 2. Commit Git
+- Commit format: `fix: simpan current_router_id pada init, auto-resolve root router, dan eliminasi silent drop`
+
+### 3. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada perbaikan ini.
+
+### 4. Bukti Verifikasi
+1. **Unit Test Suite Lengkap:** `npm test -- --run` · 50 test files, 454 test cases passed (100% lulus, exit code 0).
+2. **Router Resolution Tests:** `npx vitest run tests/unit/pipeline-router-resolution.test.ts` · 7 passed (100% lulus, exit code 0).
+3. **Customer Handle Tests:** `npx vitest run tests/unit/customer-handle.test.ts` · 19 passed (100% lulus, exit code 0).
+4. **Parity Tests:** `npx vitest run tests/unit/pipeline-parity.test.ts` · 23 passed (100% lulus, exit code 0).
+5. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% lulus, exit code 0).
+6. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · 30 passed (100% lulus, exit code 0).
+7. **TypeScript Typecheck:** `npx tsc --noEmit` · Lulus bersih (0 error).
+8. **ESLint:** `npm run lint` · Lulus bersih (0 warning, 0 error).
+9. **Next.js Standalone Build:** `npm run build` · 27 rute berhasil dikompilasi (exit code 0).
+10. **Workflow Validation:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+11. **Secret Scanner:** `./scripts/check-secrets.sh` · 0 secret terekspos (exit code 0).
+12. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (14/14 PASS, exit code 0).
+13. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 5. Known Issues / Catatan Operasional
+- Metadata sesi `customer_sessions` kini dipastikan selalu memiliki properti `current_router_id` terdefinisi sejak sapaan pertama kali dikirimkan.
 

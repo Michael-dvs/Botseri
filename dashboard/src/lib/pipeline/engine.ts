@@ -264,6 +264,20 @@ export function runPipelineStep(
       config.customer_greeting?.greeting_text ||
       "Halo, selamat datang di Berseri Florist & Decor!";
 
+    let initialRouterId: string | null = null;
+    if (greetingNode) {
+      const downstreamRouter = findDownstreamRouter(greetingNode.id, graph);
+      if (downstreamRouter) {
+        initialRouterId = downstreamRouter.id;
+      }
+    }
+    if (!initialRouterId) {
+      const firstRouter = graph.nodes.find((n) => n.type === "CONDITION_ROUTER" || n.id === "node-router");
+      if (firstRouter) {
+        initialRouterId = firstRouter.id;
+      }
+    }
+
     replies.push(greetingText);
     actions.push({
       type: "SEND_MESSAGE",
@@ -273,7 +287,7 @@ export function runPipelineStep(
     actions.push({
       type: "UPDATE_SESSION",
       nextState: "AWAITING_CHOICE",
-      nextRouterId: null,
+      nextRouterId: initialRouterId,
     });
     log.push("Pelanggan baru terhubung: Mengirim sapaan & menu.");
 
@@ -282,7 +296,7 @@ export function runPipelineStep(
       nodeTrace: visited,
       activeEdgeIds: activeEdges,
       nextState: "AWAITING_CHOICE",
-      nextRouterId: null,
+      nextRouterId: initialRouterId,
       log,
       replies,
     };
@@ -303,19 +317,21 @@ export function runPipelineStep(
         routerNode = found;
       }
     }
-
     if (!routerNode) {
-      const greetingEdge = graph.edges.find(
-        (e) => (e.source === "node-greeting" || e.source.includes("greeting")) &&
-               (e.sourceHandle === "out_next" || !e.sourceHandle)
+      const explicitRootRouter = graph.nodes.find(
+        (n) => (n.id === "node-router" || n.id === "root-router") && n.type === "CONDITION_ROUTER"
       );
-      if (greetingEdge) {
-        routerNode = graph.nodes.find((n) => n.id === greetingEdge.target && n.type === "CONDITION_ROUTER");
+      if (explicitRootRouter) {
+        routerNode = explicitRootRouter;
       }
     }
 
+    if (!routerNode && greetingNode) {
+      routerNode = findDownstreamRouter(greetingNode.id, graph);
+    }
+
     if (!routerNode) {
-      routerNode = graph.nodes.find((n) => n.id === "node-router" || n.type === "CONDITION_ROUTER");
+      routerNode = graph.nodes.find((n) => n.type === "CONDITION_ROUTER");
     }
 
     const routerId = routerNode?.id || "node-router";
@@ -330,17 +346,21 @@ export function runPipelineStep(
       ? (routerData.branches as Array<{ id: string; label: string; keywords: string[] }>)
       : null;
 
-    const lowerInput = input.text.toLowerCase().trim();
+    const cleanInput = input.text.trim().toLowerCase();
 
     // 5a. Evaluasi Cabang Kustom terlebih dahulu (mis. branch_3, branch_4, branch_sub_1)
     if (branches) {
       for (const branch of branches) {
         if (branch.id === "branch_1" || branch.id === "branch_2") continue;
-        const isMatch = Array.isArray(branch.keywords) && branch.keywords.some((kw) => {
-          const cleanKw = String(kw).toLowerCase().trim();
-          if (!cleanKw) return false;
-          return lowerInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(lowerInput);
-        });
+        const isBranch3 = branch.id === "branch_3" || branch.id.includes("catalog") || branch.id.includes("katalog");
+        const branchKeywords = Array.isArray(branch.keywords) ? branch.keywords : [];
+        const isMatch =
+          (isBranch3 && cleanInput === "3") ||
+          branchKeywords.some((kw) => {
+            const cleanKw = String(kw).toLowerCase().trim();
+            if (!cleanKw) return false;
+            return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+          });
 
         const branchEdge = graph.edges.find(
           (e) =>
@@ -415,10 +435,13 @@ export function runPipelineStep(
     const b1Keywords = Array.isArray(b1?.keywords)
       ? b1.keywords
       : config.customer_greeting?.order_trigger_keywords || ["1", "pesan", "order", "beli"];
-    const isB1Match = b1Keywords.some((kw) => {
-      const cleanKw = String(kw).toLowerCase().trim();
-      return lowerInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(lowerInput);
-    });
+    const isB1Match =
+      cleanInput === "1" ||
+      b1Keywords.some((kw) => {
+        const cleanKw = String(kw).toLowerCase().trim();
+        if (!cleanKw) return false;
+        return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+      });
 
     if (isB1Match) {
       const b1Edge = graph.edges.find(
@@ -475,10 +498,13 @@ export function runPipelineStep(
     const b2Keywords = Array.isArray(b2?.keywords)
       ? b2.keywords
       : config.customer_greeting?.ask_trigger_keywords || ["2", "tanya", "konsultasi", "admin"];
-    const isB2Match = b2Keywords.some((kw) => {
-      const cleanKw = String(kw).toLowerCase().trim();
-      return lowerInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(lowerInput);
-    });
+    const isB2Match =
+      cleanInput === "2" ||
+      b2Keywords.some((kw) => {
+        const cleanKw = String(kw).toLowerCase().trim();
+        if (!cleanKw) return false;
+        return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+      });
 
     if (isB2Match) {
       const b2Edge = graph.edges.find(
@@ -570,7 +596,7 @@ export function runPipelineStep(
       const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
       fallbackText =
         routerFallbackText ||
-        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka atau pilihan yang tertera pada menu di atas ya Kak.";
+        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai pilihan menu ya Kak.";
     }
 
     replies.push(fallbackText);
