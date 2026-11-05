@@ -29,6 +29,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Forensik & Perbaikan Drop Balasan Sapaan & Guard Unmute Sesi Pelanggan](#2026-11-05-forensik--perbaikan-drop-balasan-sapaan--guard-unmute-sesi-pelanggan)
 - [[2026-11-05] Aturan 3-Strike Fallback & Auto-Handover Minri pada Pilihan Pelanggan](#2026-11-05-aturan-3-strike-fallback--auto-handover-minri-pada-pilihan-pelanggan)
 - [[2026-11-05] Perbaikan Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft-Delete Orders](#2026-11-05-perbaikan-outbound-429-queue-mute-bypass-keyword-menubaru--soft-delete-orders)
+- [[2026-11-05] Pembisuan Ketat Saat Pesanan Aktif & Penegasan Pelepasan Sesi Pasca-Pesanan](#2026-11-05-pembisuan-ketat-saat-pesanan-aktif--penegasan-pelepasan-sesi-pasca-pesanan)
 ---
 
 ### Format Standar Entri Pembaruan
@@ -2326,4 +2327,42 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 6. Known Issues / Catatan Operasional
 - Pengiriman pesan keluar yang padat dalam waktu singkat kini secara otomatis ditunda secara halus atau dijadwalkan di antrean latar belakang sehingga n8n tidak akan lagi mengalami kegagalan AxiosError 429.
+
+
+## [2026-11-05] Pembisuan Ketat Saat Pesanan Aktif & Penegasan Pelepasan Sesi Pasca-Pesanan
+
+### 1. Ringkasan Koreksi Logika Bisnis
+1. **Pembisuan Mutlak Saat Pesanan Aktif (Zero Interruption):**
+   - Menghapus pengecualian kata sapaan (seperti "halo", "hi", "menu", "baru") saat memeriksa pesanan aktif di `dashboard/src/app/api/internal/inbound/accept/route.ts`.
+   - Selama pelanggan memiliki pesanan aktif di tabel `orders` (`status` bernilai `PENDING` atau `IN_PROGRESS`, serta `deleted_at IS NULL`), bot dibekukan secara mutlak (`accept: false, reason: "ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED"`).
+   - Bot dilarang mengirimkan pesan balasan apa pun ke WhatsApp agar tidak menyela obrolan manual antara admin toko (Minri) dan pelanggan.
+2. **Pelepasan Sesi Pasca-Penyelesaian / Penghapusan Pesanan:**
+   - Bot hanya aktif kembali setelah pesanan diselesaikan (status `COMPLETED`) atau dihapus (`CANCELLED` / `deleted_at` terisi).
+   - Fungsi `unmuteCustomerSessionByOrder` dan `releaseCustomerSession` mereset sesi pelanggan yang terkunci, mengosongkan metadata, serta mencatat log audit pemulihan sesi.
+   - Chat berikutnya dari pelanggan setelah pesanan selesai/dihapus akan disambut normal dari awal.
+
+### 2. Berkas yang Dimodifikasi
+1. `dashboard/src/app/api/internal/inbound/accept/route.ts` · Menghapus regex bypass sapaan dan memberlakukan penolakan penuh saat pesanan aktif.
+2. `dashboard/src/lib/customer/session.ts` · Penambahan logging audit pembukaan sesi pasca-pesanan.
+3. `dashboard/tests/unit/waha-queue-mute-bypass.test.ts` · Pengujian unit pembisuan ketat pada pesan "halo", "menu", dan "bisa kirim jam 2?", serta pengujian chat pasca-penyelesaian pesanan.
+4. `dashboard/tests/unit/inbound-accept.test.ts` · Penyesuaian skenario penolakan pesan saat pesanan aktif.
+
+### 3. Commit Git
+- Commit format: `fix: pembisuan ketat bot saat pesanan aktif tanpa interupsi sapaan dan penegasan rilis sesi`
+
+### 4. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada perbaikan ini.
+- Rollback: Jalankan `git revert HEAD` jika ingin mengembalikan perubahan kode.
+
+### 5. Bukti Verifikasi
+1. **Pengujian Unit Strict Mute (`waha-queue-mute-bypass.test.ts`):** 4/4 passed (100% Lulus).
+2. **Unit Test Suite Lengkap:** `npm test -- --run` · 52 test files, 466 test cases passed (100% Lulus, exit code 0).
+3. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% Lulus, exit code 0).
+4. **TypeScript Typecheck & ESLint:** `npx tsc --noEmit && npm run lint` · 0 error, 0 warning.
+5. **Skrip Simulasi E2E Terpadu (`scripts/test-e2e-incoming.ts`):** 9/9 langkah PASS (100% Lulus).
+6. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (exit code 0).
+7. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 6. Known Issues / Catatan Operasional
+- Pelanggan yang memiliki pesanan aktif dijamin tidak akan pernah menerima interupsi dari bot sampai staf menyelesaikan atau membatalkan pesanan tersebut di dashboard.
 

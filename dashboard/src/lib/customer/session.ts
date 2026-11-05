@@ -67,5 +67,15 @@ export async function unmuteCustomerSessionByOrder(
     count++;
   }
 
+  if (count > 0) {
+    console.log(
+      JSON.stringify({
+        level: "INFO",
+        source: "customer_session",
+        message: `Unmuted ${count} customer session(s) post-order`,
+        phones: uniquePhones,
+      })
+    );
+  }
   return count;
 }

@@ -89,8 +89,8 @@ describe("Verifikasi Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft
     authorizedNumberFindUniqueMock.mockResolvedValue(null);
   });
 
-  describe("Bagian 1: Bypass Mute Pelanggan via Kata Kunci (MENU, BARU, HALO)", () => {
-    it("Pelanggan yang memiliki pesanan aktif mengirim 'MENU' berhasil melewati gerbang accept dan me-reset sesi", async () => {
+  describe("Bagian 1: Pembisuan Ketat Saat Pesanan Aktif (Strict Bot Muting)", () => {
+    it("Pelanggan yang memiliki pesanan aktif mengirim 'halo', 'menu', atau 'bisa kirim jam 2?' SELALU ditolak (accept: false)", async () => {
       orderFindFirstMock.mockResolvedValue({
         id: "order-active-1",
         customer_name: "Budi",
@@ -103,15 +103,35 @@ describe("Verifikasi Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft
         phone_e164: "+628123456789",
         state: "PAUSED_FOR_OWNER",
         paused_at: new Date(),
-        metadata: { current_router_id: "node-router", retry_count: 2 },
+        metadata: {},
       });
       customerSessionUpdateMock.mockResolvedValue({});
 
-      const req = new Request("http://localhost:3000/api/internal/inbound/accept", {
+      // 1. Uji pesan sapaan "halo"
+      const reqHalo = new Request("http://localhost:3000/api/internal/inbound/accept", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          wa_message_id: "msg-bypass-menu",
+          wa_message_id: "msg-halo-muted",
+          chat_id: "628123456789@c.us",
+          from: "628123456789@c.us",
+          from_me: false,
+          body: "halo kak",
+          received_at: new Date().toISOString(),
+        }),
+      });
+      const resHalo = await inboundAcceptPOST(reqHalo);
+      expect(resHalo.status).toBe(200);
+      const dataHalo = await resHalo.json();
+      expect(dataHalo.accept).toBe(false);
+      expect(dataHalo.reason).toBe("ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED");
+
+      // 2. Uji pesan "MENU"
+      const reqMenu = new Request("http://localhost:3000/api/internal/inbound/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wa_message_id: "msg-menu-muted",
           chat_id: "628123456789@c.us",
           from: "628123456789@c.us",
           from_me: false,
@@ -119,90 +139,51 @@ describe("Verifikasi Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft
           received_at: new Date().toISOString(),
         }),
       });
+      const resMenu = await inboundAcceptPOST(reqMenu);
+      const dataMenu = await resMenu.json();
+      expect(dataMenu.accept).toBe(false);
+      expect(dataMenu.reason).toBe("ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED");
 
-      const res = await inboundAcceptPOST(req);
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.accept).toBe(true);
-      expect(data.role).toBe("CUSTOMER");
-
-      expect(customerSessionUpdateMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { id: "sess-cust-1" },
-          data: expect.objectContaining({
-            state: "AWAITING_CHOICE",
-            paused_at: null,
-            metadata: expect.objectContaining({
-              current_router_id: null,
-              retry_count: 0,
-            }),
-          }),
-        })
-      );
-    });
-
-    it("Pelanggan yang memiliki pesanan aktif mengirim 'BARU' berhasil melewati gerbang accept", async () => {
-      orderFindFirstMock.mockResolvedValue({
-        id: "order-active-2",
-        customer_name: "Ani",
-        created_at: new Date(),
-        status: "IN_PROGRESS",
-      });
-
-      customerSessionFindUniqueMock.mockResolvedValue({
-        id: "sess-cust-2",
-        phone_e164: "+628123456789",
-        state: "PAUSED_FOR_OWNER",
-        paused_at: new Date(),
-        metadata: {},
-      });
-      customerSessionUpdateMock.mockResolvedValue({});
-
-      const req = new Request("http://localhost:3000/api/internal/inbound/accept", {
+      // 3. Uji pesan tanya jadwal "bisa kirim jam 2?"
+      const reqTanya = new Request("http://localhost:3000/api/internal/inbound/accept", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          wa_message_id: "msg-bypass-baru",
+          wa_message_id: "msg-tanya-muted",
           chat_id: "628123456789@c.us",
           from: "628123456789@c.us",
           from_me: false,
-          body: "baru",
+          body: "bisa kirim jam 2?",
           received_at: new Date().toISOString(),
         }),
       });
-
-      const res = await inboundAcceptPOST(req);
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.accept).toBe(true);
-      expect(data.role).toBe("CUSTOMER");
+      const resTanya = await inboundAcceptPOST(reqTanya);
+      const dataTanya = await resTanya.json();
+      expect(dataTanya.accept).toBe(false);
+      expect(dataTanya.reason).toBe("ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED");
     });
 
-    it("Pelanggan yang memiliki pesanan aktif mengirim 'bisa kirim sekarang?' tetap dibisukan (accept: false)", async () => {
-      orderFindFirstMock.mockResolvedValue({
-        id: "order-active-3",
-        customer_name: "Citra",
-        created_at: new Date(),
-        status: "PENDING",
-      });
+    it("Setelah pesanan selesai atau dihapus, pesan 'halo' berikutnya dari pelanggan DITERIMA (accept: true)", async () => {
+      // Tidak ada pesanan aktif
+      orderFindFirstMock.mockResolvedValue(null);
 
       customerSessionFindUniqueMock.mockResolvedValue({
-        id: "sess-cust-3",
+        id: "sess-cust-unmuted",
         phone_e164: "+628123456789",
         state: "ACTIVE",
+        paused_at: null,
         metadata: {},
       });
-      customerSessionUpdateMock.mockResolvedValue({});
 
       const req = new Request("http://localhost:3000/api/internal/inbound/accept", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          wa_message_id: "msg-muted-chat",
+          wa_message_id: "msg-post-order-chat",
           chat_id: "628123456789@c.us",
           from: "628123456789@c.us",
           from_me: false,
-          body: "bisa kirim sekarang?",
+          body: "halo",
           received_at: new Date().toISOString(),
         }),
       });
@@ -210,8 +191,8 @@ describe("Verifikasi Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft
       const res = await inboundAcceptPOST(req);
       expect(res.status).toBe(200);
       const data = await res.json();
-      expect(data.accept).toBe(false);
-      expect(data.reason).toBe("ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED");
+      expect(data.accept).toBe(true);
+      expect(data.role).toBe("CUSTOMER");
     });
   });
 

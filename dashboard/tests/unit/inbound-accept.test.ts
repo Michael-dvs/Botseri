@@ -487,7 +487,7 @@ describe("POST /api/internal/inbound/accept", () => {
     expect(data.reason).toBe("ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED");
   });
 
-  it("bypasses mute when customer with active order explicitly sends 'MENU' or 'BARU'", async () => {
+  it("strictly mutes bot when customer has active order, even if sending 'MENU'", async () => {
     authorizedNumberFindFirstMock.mockResolvedValue(null);
     customerSessionFindUniqueMock.mockResolvedValue(null);
     orderFindFirstMock.mockResolvedValue({
@@ -508,8 +508,8 @@ describe("POST /api/internal/inbound/accept", () => {
     const res = await POST(req);
     expect(res.status).toBe(200);
     const data = await res.json();
-    expect(data.accept).toBe(true);
-    expect(data.role).toBe("CUSTOMER");
+    expect(data.accept).toBe(false);
+    expect(data.reason).toBe("ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED");
   });
 
   it("sends reminder once when mute TTL is exceeded (MUTE_TTL_EXPIRED_REMINDER_SENT)", async () => {
