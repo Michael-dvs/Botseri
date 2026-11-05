@@ -1314,3 +1314,63 @@ Korespondensi dengan fase BRD: M1 sampai M2 = Fase 1, M3 sampai M4 = Fase 2, M5 
 ### 22.4 Berkas `AGENTS.md`
 
 Buat `AGENTS.md` di root repositori berisi ringkasan 10 baris: tautan ke dokumen ini, daftar invarian (0.2), daftar larangan (22.3), perintah build/test, dan aturan tag `[VERIFY]`/`[OPEN]`. Berkas ini dibaca otomatis oleh sebagian besar AI coding assistant.
+
+---
+
+## 23. Subsistem Tambahan Pasca-Patch (S01 · S13)
+
+### 23.1 Jalur Pelanggan (Customer Inbound Routing)
+1. **Isolasi Penuh Jalur Pelanggan:**
+   - Jalur pelanggan berjalan sepenuhnya terpisah dari agen operasional Owner. Pesan pelanggan tidak pernah mencapai tool internal (`save_todo_and_sync_google`, `update_todo_status`, atau endpoint rahasia).
+   - Route `/api/internal/inbound/accept` mengklasifikasikan nomor pengirim: `OWNER` (jika terdaftar di `authorized_numbers`) atau `CUSTOMER` (jika nomor eksternal).
+2. **Model Sesi Pelanggan (`customer_sessions`):**
+   - Setiap pelanggan memiliki rekaman sesi yang menyimpan state percakapan: `INIT`, `AWAITING_CHOICE`, `AWAITING_ORDER`, `PAUSED_FOR_OWNER`, atau `ACTIVE`.
+   - Metadata sesi menyimpan draft pesanan parsial, penghitung percobaan (`retry_count`), dan ID pesan terakhir untuk idempotensi.
+3. **State Machine Deterministik:**
+   - Logika percabangan menu, formulir, dan jeda bot diatur secara deterministik tanpa campur tangan LLM.
+   - Jika pelanggan membutuhkan konsultasi manual atau pesanan aktif sedang berjalan, bot otomatis menjeda diri (`PAUSED_FOR_OWNER`) dengan batas waktu `CUSTOMER_PAUSE_TTL_HOURS` (default 24 jam).
+
+### 23.2 Studio Pipeline Visual
+1. **Graf Kanvas & SSOT Proyeksi:**
+   - Antarmuka Studio Alur menggunakan kanvas visual interaktif. Konfigurasi graf disimpan sebagai JSON terstruktur.
+   - Fungsi murni `projectCoreConfig(graph)` bertindak sebagai Single Source of Truth (SSOT) yang memproyeksikan graf menjadi parameter runtime operasional toko.
+2. **Validator Graf Sisi Server (`validate-graph.ts`):**
+   - Setiap penyimpanan graf divalidasi ketat di sisi server untuk mendeteksi graf siklik (infinite loop) dan node tanpa jalur keluar. Graf tidak valid ditolak dengan HTTP 422 Unprocessable Entity.
+3. **Kontrol Versi Optimistik (`pipeline_config_versions`):**
+   - Penyimpanan alur mewajibkan penyertaan `expected_version`. Mismatch versi memicu penolakan HTTP 409 Conflict untuk mencegah race condition antar-operator.
+   - Setiap revisi dicatat ke tabel riwayat versi untuk mendukung rollback instan.
+
+### 23.3 Waktu & Alarm Tugas
+1. **Fasad Waktu Kanonik (`resolveTaskTimes`):**
+   - Menyediakan satu pintu resolusi waktu operasional yang membedakan secara tegas antara waktu pengingat (`remind_at`) dan tenggat akhir (`due_at`).
+   - Menerapkan aturan Kasus A: tugas dengan permintaan pengingat waktu tertentu (misal: "ingatkan jam 2 siang") mengisi kolom `remind_at` dengan `due_at = null`.
+2. **Retensi & Siklus Alarm Terlewat (`reminder_expired_at`):**
+   - Scheduler memantau to-do yang memiliki `remind_at <= now` dan belum diklaim (`reminded_at IS NULL`).
+   - Alarm yang terlewat lebih dari ambang batas toleransi akan ditandai dengan mengisi `reminder_expired_at` untuk mencegah ledakan notifikasi basi pasca-server pulih dari downtime.
+
+### 23.4 Konfirmasi Tindakan Destruktif Dua Langkah
+1. **Pencegahan Penghapusan Fatal:**
+   - Tindakan berbahaya (penghapusan pesanan `DELETE` atau penyelesaian seluruh pesanan `ALL`) tidak langsung dieksekusi di database.
+2. **Tabel `pending_confirmations`:**
+   - Sistem menahan eksekusi dan mencatat token konfirmasi berumur 5 menit.
+   - Owner wajib membalas dengan kata konfirmasi eksplisit ("YA") dalam rentang waktu tersebut untuk mengeksekusi aksi.
+   - Penghapusan pesanan menerapkan pola soft delete dengan mengisi kolom `deleted_at`.
+
+### 23.5 LLM Gateway, Error Taxonomy, & Failover
+1. **Adapter Gemini:**
+   - Pembersihan skema OpenAPI ketat berbasis whitelist untuk memastikan kompatibilitas penuh dengan API Google Gemini.
+   - Kunci API dikirim melalui header `x-goog-api-key` (dilarang menggunakan query parameter `?key=`).
+2. **Taksonomi Error Terstruktur (`ProviderError`):**
+   - Menstandardisasi galat dari penyedia upstream ke dalam kategori: `RATE_LIMIT`, `AUTH`, `TIMEOUT`, `BAD_REQUEST`, `UPSTREAM`, dan `TRUNCATED`.
+3. **Failover Otomatis Model Cadangan (`is_fallback`):**
+   - Jika model utama mengalami HTTP 429 atau upstream timeout, gateway melakukan retry 1x lalu secara otomatis mengalihkan permintaan ke model cadangan yang ditandai `is_fallback = true` pada tabel `llm_configs`.
+
+### 23.6 Antrean WAHA Humanizer & Circuit Breaker
+1. **Tiga Tingkat Prioritas Antrean:**
+   - `P0` (Kritis): Alarm tugas terjadwal (`TASK_ALARM`).
+   - `P1` (Tinggi): Balasan pesan untuk Owner (`CHAT_MASUK`, `PAIRING`).
+   - `P2` (Normal): Balasan pesan untuk Pelanggan (`CUSTOMER_REPLY`).
+2. **Reservasi Kuota Anti-Starvation:**
+   - Menjamin 1 slot per menit dan 5 slot per jam khusus untuk P0, sehingga pesan darurat tidak pernah terhalang oleh banjir pesan pelanggan.
+3. **Circuit Breaker Persisten:**
+   - Tiga kegagalan beruntun atau deteksi pembatasan Meta memicu cooldown 30 menit. Status dipersistensikan pada tabel `runtime_flags` agar bertahan melintasi restart kontainer.

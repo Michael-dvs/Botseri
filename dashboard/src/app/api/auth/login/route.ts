@@ -52,7 +52,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const token = await createSessionToken(admin.id, admin.username);
+  const token = await createSessionToken(admin.id, admin.username, admin.token_version);
   const response = NextResponse.json({ ok: true });
   response.cookies.set(
     SESSION_COOKIE,

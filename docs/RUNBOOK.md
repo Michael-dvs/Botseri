@@ -322,6 +322,14 @@ curl -i -H "cf-connecting-ip: 1.2.3.4" http://127.0.0.1:3000/api/internal/health
 
 Pengujian akses melalui domain publik Cloudflare berstatus `〔PERLU VERIFIKASI MANUAL〕` bila domain belum didelegasikan secara aktif.
 
+### 8.3 Arsitektur Rate Limiter & SETUP_TOKEN
+1. **Rate Limiter Login Berbasis Memori:**
+   - Pembatas laju login diimplementasikan menggunakan counter in-memory di dalam proses Next.js (`MemoryRateLimiter`).
+   - Pembatas ini dirancang spesifik untuk arsitektur *single-replica* kontainer Docker Botseri. Arsitektur ini meniadakan kebutuhan dependensi Redis tambahan sehingga meminimalkan kompleksitas pemeliharaan home-server.
+2. **Keamanan SETUP_TOKEN:**
+   - Variabel `SETUP_TOKEN` wajib dikonfigurasi melalui file `.env` di lingkungan produksi sebelum wizard setup pertama kali diakses.
+   - Begitu proses inisialisasi selesai (`setup_completed = true`), token setup tidak akan pernah dicetak ulang di terminal log atau diekspos melalui API demi mencegah pengambilalihan akun.
+
 ---
 
 ## 9. Tabel Troubleshooting Cepat
@@ -336,3 +344,43 @@ Pengujian akses melalui domain publik Cloudflare berstatus `〔PERLU VERIFIKASI 
 | Sinkronisasi Google macet (percobaan >= 8) | Error validasi kalender atau kuota API Google habis | Buka `/status` dan `/logs` untuk membaca pesan error; pastikan Calendar ID dan Tasklist ID valid. |
 | Error HTTP 503 Service Unavailable pada dashboard | Container database PostgreSQL belum sehat atau gagal start | Periksa log `docker compose logs botseri-db` dan status koneksi port 5432. |
 | Token setup tidak dapat dipakai / login gagal | Akun admin sudah dibuat atau cookie sesi kedaluwarsa | Jika lupa password admin, reset database dari backup atau buat user baru via Prisma CLI. |
+
+### 9.2 Pohon Pemecahan Masalah: Pelanggan Tidak Dibalas Bot
+Jika pesan dari nomor pelanggan masuk ke WhatsApp tetapi bot tidak memberikan balasan apa pun:
+1. **Langkah 1: Periksa Status Mute Pelanggan (`PAUSED_FOR_OWNER`):**
+   - Jalankan kueri: `SELECT phone_e164, state, paused_at FROM customer_sessions WHERE phone_e164 = '+62...';`
+   - Jika state adalah `PAUSED_FOR_OWNER`, bot sengaja dijeda agar owner dapat berinteraksi secara manual. Bot akan otomatis aktif kembali setelah TTL kedaluwarsa (default 24 jam) atau saat pesanan diselesaikan.
+2. **Langkah 2: Periksa Inbound Rapid-Fire Cooldown / Rate Limit:**
+   - Periksa tabel `message_log` dan event `INBOUND_HOURLY_LIMIT`. Pelanggan yang mengirimkan lebih dari 30 pesan dalam 1 jam akan ditahan sementara untuk mencegah spamming.
+3. **Langkah 3: Periksa Error Kuota LLM Gateway (429 / Insufficient Quota):**
+   - Buka `/status` dan periksa kartu LLM Gateway. Jika model utama mengalami HTTP 429 atau kuota habis, pastikan model cadangan (`is_fallback = true`) telah dikonfigurasi di menu Integrasi.
+4. **Langkah 4: Periksa Circuit Breaker WAHA:**
+   - Buka `/status`. Jika status Circuit Breaker adalah `COOLDOWN`, pengiriman pesan keluar ditahan selama 30 menit. Jika aman, lakukan reset melalui tombol Reset Guard.
+5. **Langkah 5: Periksa Koneksi WAHA:**
+   - Pastikan WAHA berada dalam status `WORKING`. Jika `SCAN_QR_CODE` atau `FAILED`, tautkan kembali sesi WhatsApp.
+6. **Langkah 6: Periksa Pointer Stale Graf Pipeline:**
+   - Buka Studio Alur (`/pipeline`). Pastikan tidak ada node yang terputus (unreachable) atau graf siklik yang memicu fallback diam.
+
+---
+
+## 10. Prosedur Rollback Versi Pipeline
+Setiap kali konfigurasi graf alur disimpan di Studio Alur, sistem secara otomatis mencatat snapshot versi ke tabel `pipeline_config_versions`.
+
+### 10.1 Melihat Riwayat Versi
+Jalankan kueri SQL di container database:
+```sql
+SELECT version, created_at, actor, notes
+FROM pipeline_config_versions
+ORDER BY version DESC
+LIMIT 10;
+```
+
+### 10.2 Melakukan Rollback via API
+Kirimkan request `POST /api/pipeline/rollback` dengan membawa nomor versi target:
+```bash
+curl -X POST http://127.0.0.1:3000/api/pipeline/rollback \
+  -H "Content-Type: application/json" \
+  -H "Cookie: botseri_session=<cookie_admin_sah>" \
+  -d '{"target_version": 2}'
+```
+Sistem akan memulihkan graf alur dan presets ke versi yang dipilih serta mencatat event audit `PIPELINE_ROLLBACK`.

@@ -124,7 +124,7 @@ export async function POST(request: Request) {
       return { admin, updated };
     });
 
-    const token = await createSessionToken(result.admin.id, result.admin.username);
+    const token = await createSessionToken(result.admin.id, result.admin.username, result.admin.token_version ?? 0);
     const response = NextResponse.json({
       ok: true,
       setup_completed: true,

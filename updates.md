@@ -2,6 +2,42 @@
 
 Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, komponen antarmuka, dan hasil verifikasi pengujian.
 
+
+## Indeks Navigasi Cepat (Daftar Isi)
+- [Format Standar Entri Pembaruan](#format-standar-entri-pembaruan)
+- [Catatan Historis: Pembuatan Tabel customer_sessions](#catatan-historis-pembuatan-tabel-customer_sessions)
+- [[2026-10-27] LLM Catalog Discovery](#2026-10-27-automated-multi-provider-llm-model-discovery-catalog-sync--metadata-auto-fill)
+- [[2026-11-04] S03: Contract Test n8n vs Zod](#2026-11-04-s03-contract-test-n8n-vs-zod)
+- [[2026-11-04] S04: Konfirmasi Dua Langkah & Soft Delete Pesanan](#2026-11-04-s04-konfirmasi-dua-langkah--soft-delete-pesanan)
+- [[2026-11-04] S05: Kebijakan Mute & Digest Pelanggan](#2026-11-04-s05-kebijakan-mute--digest-pelanggan)
+- [[2026-11-04] S06: Validasi Graf & Visual Pipeline](#2026-11-04-s06-validasi-graf--visual-pipeline)
+- [[2026-11-04] S07: Standarisasi Waktu & Alarm](#2026-11-04-s07-standarisasi-waktu--alarm)
+- [[2026-11-04] S08: Reliabilitas Scheduler & Dead-Man Switch](#2026-11-04-s08-reliabilitas-scheduler-dan-observabilitas)
+- [[2026-11-04] S09: Antrean Prioritas WAHA & Circuit Breaker](#2026-11-04-s09-antrean-prioritas-waha-humanizer)
+- [[2026-11-04] S10: Refaktor Orders Service & Pengecekan Sesi](#2026-11-04-s10-refaktor-orders-service)
+- [[2026-11-04] S11: LLM Gateway Parameter Override & Failover](#2026-11-04-s11-llm-gateway-konfigurasi-nyata)
+- [[2026-11-05] S12: Privasi Data Pelanggan & Retensi](#2026-11-05-s12-privasi-data-pelanggan-dan-retensi-p2)
+- [[2026-11-05] S13: Staging, Test Integrasi, & Evaluasi Prompt](#2026-11-05-s13-staging-test-integrasi-dan-evaluasi-prompt-p2)
+- [[2026-11-05] S14: Dokumentasi, Operasional, & Penutupan Utang Lama](#2026-11-05-s14-dokumentasi-operasional-dan-penutupan-utang-lama-p2)
+
+---
+
+### Format Standar Entri Pembaruan
+Setiap entri pembaruan sistem Botseri wajib mengikuti struktur baku berikut:
+1. `Tanggal & Section`
+2. `Ringkasan Pekerjaan`
+3. `Commit Git`
+4. `Migrasi dan Rollback`
+5. `Bukti Verifikasi (perintah + ringkasan output)`
+6. `Known Issues / Catatan Operasional`
+
+---
+
+### Catatan Historis: Pembuatan Tabel customer_sessions
+- **Tanggal Migrasi:** 2026-11-02
+- **Nama Migrasi:** `20261102000000_add_customer_sessions`
+- **Tujuan Arsitektur:** Pembuatan tabel `customer_sessions` untuk menampung sesi percakapan pelanggan dari nomor non-whitelist WhatsApp, percabangan state machine deterministik (`INIT`, `AWAITING_CHOICE`, `AWAITING_ORDER`, `PAUSED_FOR_OWNER`, `ACTIVE`), jeda otomatis ke owner (`paused_at`), dan penyimpanan draft pesanan parsial dalam kolom `metadata`.
+- **Kolom Utama:** `id` (UUID), `phone_e164` (VARCHAR 50, UNIQUE), `customer_name` (VARCHAR 255), `state` (Enum `CustomerSessionState`), `paused_at` (TIMESTAMPTZ), `last_message_at` (TIMESTAMPTZ), `metadata` (JSONB).
 ---
 
 ## [2026-10-27] Automated Multi-Provider LLM Model Discovery, Catalog Sync, & Metadata Auto-Fill
@@ -1823,3 +1859,49 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 4. Migrasi & Rollback
 - Migrasi: Tidak ada migrasi skema database baru pada Section S13 (skema tetap stabil).
+
+## [2026-11-05] S14: Dokumentasi, Operasional, dan Penutupan Utang Lama (P2)
+
+### 1. Ringkasan Pekerjaan
+1. **Pencabutan Sesi JWT (`token_version`):**
+   - Menambahkan kolom `token_version` pada tabel `admin_users` dengan default `0`.
+   - Menyertakan klaim `token_version` pada penerbitan JWT di endpoint login (`/api/auth/login`) dan setup (`/api/setup`).
+   - Memperbarui `getSession()` untuk memverifikasi `token_version` dari token terhadap nilai di database; token usang seketika ditolak dengan `null` / HTTP 401.
+   - Memperbarui endpoint logout (`/api/auth/logout`) untuk menaikkan `token_version` secara atomik (`increment: 1`) sehingga seluruh token JWT aktif sebelumnya dicabut seketika.
+2. **Constraint Singleton Tabel Pengaturan (`bot_settings`):**
+   - Menambahkan CHECK constraint `bot_settings_single_row CHECK (id = 1)` via migrasi SQL forward-only.
+3. **Penyusunan Checklist Penutupan Step 07:**
+   - Menyusun `docs/reports/step-07-closure-checklist.md` berisi 6 butir verifikasi operasional manual untuk dieksekusi pemilik proyek tanpa mencentang `00-MASTER-ROADMAP.md`.
+4. **Sinkronisasi Dokumentasi Sistem:**
+   - `docs/ARCHITECTURE.md`: Menambahkan Bagian 23 merangkum Jalur Pelanggan, Studio Pipeline, Standarisasi Waktu & Alarm, Konfirmasi Destruktif Dua Langkah, LLM Gateway Failover, serta Antrean WAHA Humanizer.
+   - `docs/DATABASE.md`: Memperbarui kamus data tabel (`admin_users`, `bot_settings`, `orders`, `todos`, `authorized_numbers`, `llm_configs`) dan mendokumentasikan tabel baru (`customer_sessions`, `pipeline_configs`, `pipeline_config_versions`, `pending_confirmations`, `scheduler_locks`, `runtime_flags`).
+   - `docs/RUNBOOK.md`: Menghapus klaim frekuensi cron 15 menit menjadi 1 menit, mendokumentasikan rate limiter single-replica, `SETUP_TOKEN`, banner STALE, reset guard WAHA, troubleshooting tree pelanggan tidak dibalas, dan rollback alur.
+   - `docs/reports/step-08-execution-report.md`: Menambahkan catatan ralat bertanggal (*Errata*) untuk hitungan `llm_configs`, ringkasan smoke test, dan respon 404 vs 401.
+   - `updates.md`: Menambahkan Daftar Isi dan catatan historis tabel `customer_sessions`.
+
+### 2. Commit Git
+- Commit format `G-04`: `feat(s14): pencabutan jwt token_version, constraint bot_settings, checklist step 07, dan sinkronisasi dokumentasi sistem`
+
+### 3. Migrasi dan Rollback
+- **Migrasi 1:** `20261105110000_add_token_version_to_admin_users`
+  - SQL: `ALTER TABLE "admin_users" ADD COLUMN "token_version" INTEGER NOT NULL DEFAULT 0;`
+  - Rollback: `ALTER TABLE "admin_users" DROP COLUMN IF EXISTS "token_version";`
+- **Migrasi 2:** `20261105120000_add_bot_settings_single_row_constraint`
+  - SQL: `ALTER TABLE "bot_settings" ADD CONSTRAINT "bot_settings_single_row" CHECK (id = 1);`
+  - Rollback: `ALTER TABLE "bot_settings" DROP CONSTRAINT IF EXISTS "bot_settings_single_row";`
+
+### 4. Bukti Verifikasi
+1. **Unit Test S14:** `npx vitest run tests/unit/auth-token-version.test.ts tests/unit/db-constraints.test.ts` · **8 passed** (5 token version, 3 db constraint).
+2. **Unit Test Suite Lengkap:** `npm test -- --run` · **49 test files, 440 passed** (100% lulus, exit code 0).
+3. **Integration Test Suite:** `npm run test:integration` · **8 passed** (100% lulus, exit code 0).
+4. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · **30 passed** (100% lulus, exit code 0).
+5. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` · **Lulus bersih (0 error, 0 warning)**.
+6. **Build Standalone:** `npm run build` · **Lulus (27 routes compiled)**.
+7. **Workflow Validation:** `./scripts/validate-workflows.sh` · **Lulus (2 files valid)**.
+8. **Pemeriksaan Bebas Em Dash (R-02):** `git diff | grep -nE "[—–]"` · **Bersih (0 em dash)**.
+9. **Audit Klaim 15 Menit:** `grep -n "15 menit" docs/RUNBOOK.md` · **Bersih (0 temuan)**.
+10. **Roadmap Lock (G-07):** `git diff docs/steps/00-MASTER-ROADMAP.md` · **Tidak ada perubahan (0 diff)**.
+
+### 5. Known Issues / Catatan Operasional
+- Penolakan token lama saat logout memerlukan koneksi database yang aktif; jika database down, fallback keamanan menolak token yang tidak dapat divalidasi.
+- Kotak centang pada `docs/reports/step-07-closure-checklist.md` sengaja dibiarkan kosong `[ ]` dan roadmap Step 07 tetap tidak dicentang hingga pemilik sistem melakukan verifikasi fisik WhatsApp di lingkungan operasional nyata.

@@ -406,3 +406,18 @@ Lakukan drill restore minimal setiap 3 bulan (satu kuartal sekali) mengikuti pro
 2. **Proteksi Ingress Cloudflare di Domain Publik:** Pengujian pemblokiran rute `/api/internal/*` melalui domain publik (`https://panel.domainanda.com/api/internal/health`) harus diverifikasi manual setelah Cloudflare Tunnel didelegasikan ke domain publik asli.
 3. **Status GitHub Actions di Remote:** Menunggu owner melakukan push commit ke remote repository GitHub untuk melihat status badge hijau Actions.
 4. **Shellcheck di Host Lokal:** Memerlukan pemasangan biner `shellcheck` pada host macOS lokal (telah terpasang otomatis di CI runner Ubuntu).
+
+---
+
+## 6. Catatan Ralat Bertanggal (Errata · 5 November 2026)
+
+Catatan ralat ini ditambahkan untuk mengoreksi inkonsistensi minor historis pada laporan di atas tanpa mengubah catatan aslinya:
+1. **Koreksi Hitungan Tabel llm_configs:**
+   - Pada Bagian 3.5 Tahap 1 tertera `Table llm_configs: source=0, restored=0`, sementara pada Tahap 2 tertera `llm_configs (1)` dengan hash MD5.
+   - Klarifikasi: Pada Tahap 1, database uji awal belum memiliki baris konfigurasi LLM. Pada Tahap 2, satu baris konfigurasi LLM telah disisipkan (`00281750-acd6-4f1c-8a6f-7e7bb54a78a3`) untuk membuktikan keutuhan dekripsi kunci API pascarestore.
+2. **Koreksi Ringkasan Kelulusan Smoke Test (8/8 vs 9/9):**
+   - Pada ringkasan Bagian 1.2 tertera `8/8 PASS`, sementara pada cuplikan Bagian 3.3 tercatat 9 baris pemeriksaan PASS (`Health check`, `Auth guard`, `Auth success`, `Workflow n8n`, `INV-01`, `Database migrasi`, `WAHA reachable`, `INV-08 404`, dan `INV-08 Kontrol 200`).
+   - Klarifikasi: Angka `8/8` sebelumnya merujuk pada 8 butir spesifikasi (di mana pemeriksaan INV-08 dan kontrolnya dihitung sebagai satu paket pengujian). Output aktual smoke test mengeksekusi 9 pemeriksaan dan seluruhnya lulus (9/9 PASS).
+3. **Klarifikasi Respons HTTP 404 vs 401 pada Rute Terproteksi:**
+   - Rute internal `/api/internal/*` yang diakses dari luar melalui Cloudflare Tunnel ditolak dengan HTTP 404 Not Found (INV-08) guna menyamarkan keberadaan endpoint internal dari penyerang publik.
+   - Sementara itu, rute API dashboard (`/api/stats`, `/api/usage`, dan lainnya) yang diakses tanpa sesi admin sah ditolak dengan HTTP 401 Unauthorized oleh middleware dan otorisasi sesi.

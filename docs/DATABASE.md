@@ -1,4 +1,4 @@
-# DATABASE.md — Spesifikasi Basis Data Botseri
+# DATABASE.md : Spesifikasi Basis Data Botseri
 
 > **Status:** Kanonik · **Arsitektur Rujukan:** `ARCHITECTURE.md` §5, §10, §11 · **Database Engine:** PostgreSQL 16
 > **ORM:** Prisma ORM (v5+) · **Invarian SSOT:** INV-01 (PostgreSQL adalah satu-satunya sumber kebenaran, hanya `botseri-dashboard` yang terhubung)
@@ -249,6 +249,7 @@ Menyimpan akun tunggal admin pengelola dashboard Botseri.
 - `id` (`UUID`, PK, default `gen_random_uuid()`)
 - `username` (`VARCHAR(255)`, UNIQUE, NOT NULL)
 - `password_hash` (`TEXT`, NOT NULL): di-hash menggunakan Argon2id
+- `token_version` (`INTEGER`, NOT NULL, default 0): penomoran versi token JWT untuk pencabutan sesi instan saat logout
 - `created_at` (`TIMESTAMPTZ`, default `now()`)
 - `updated_at` (`TIMESTAMPTZ`, default `now()`)
 
@@ -279,8 +280,11 @@ Pengaturan bot dan profil bisnis (baris tunggal / singleton `id = 1`).
 - `google_sync_mode` (`GoogleSyncMode`, default `AUTO`)
 - `bot_enabled` (`BOOLEAN`, default true)
 - `setup_completed` (`BOOLEAN`, default false)
+- `customer_data_retention_days` (`INTEGER`, NOT NULL, default 365)
+- `ai_form_fallback_requires_paid_model` (`BOOLEAN`, NOT NULL, default false)
 - `created_at` (`TIMESTAMPTZ`, default `now()`)
 - `updated_at` (`TIMESTAMPTZ`, default `now()`)
+- **Constraint:** `bot_settings_single_row` (`CHECK (id = 1)`)
 
 ### 3.3 `priority_levels`
 Definisi Priority Stack dinamis yang disusun owner.
@@ -298,7 +302,9 @@ Konteks pesanan pelanggan (bukan modul invoice).
 - `id` (`UUID`, PK, default `gen_random_uuid()`)
 - `customer_name` (`VARCHAR(150)`, NOT NULL)
 - `customer_contact` (`VARCHAR(50)`, NULL)
+- `customer_chat_id` (`VARCHAR(100)`, NULL)
 - `description` (`TEXT`, NOT NULL)
+- `status` (`OrderStatus`, default `PENDING`)
 - `event_date` (`TIMESTAMPTZ`, NULL)
 - `delivery_date` (`TIMESTAMPTZ`, NULL)
 - `delivery_address` (`TEXT`, NULL)
@@ -306,9 +312,10 @@ Konteks pesanan pelanggan (bukan modul invoice).
 - `dp_amount` (`NUMERIC(14,2)`, NULL)
 - `payment_status` (`OrderPaymentStatus`, default `UNPAID`)
 - `notes` (`TEXT`, NULL)
+- `completed_at` (`TIMESTAMPTZ`, NULL)
+- `deleted_at` (`TIMESTAMPTZ`, NULL): timestamp soft delete
 - `created_at` (`TIMESTAMPTZ`, default `now()`)
 - `updated_at` (`TIMESTAMPTZ`, default `now()`)
-
 ### 3.5 `todos`
 Entitas utama tugas kerja dan manajemen tenggat.
 - `id` (`UUID`, PK, default `gen_random_uuid()`)
@@ -320,11 +327,15 @@ Entitas utama tugas kerja dan manajemen tenggat.
 - `priority_rank` (`INTEGER`, NOT NULL): salinan rank saat to-do dibuat
 - `due_at` (`TIMESTAMPTZ`, NULL)
 - `has_specific_time` (`BOOLEAN`, default false): true hanya jika jam eksplisit disebut
+- `remind_at` (`TIMESTAMPTZ`, NULL): waktu alarm pengingat independen dari due_at
+- `reminded_at` (`TIMESTAMPTZ`, NULL): timestamp saat alarm berhasil dikirim
+- `reminder_claimed_at` (`TIMESTAMPTZ`, NULL): timestamp saat alarm dikunci scheduler
+- `reminder_expired_at` (`TIMESTAMPTZ`, NULL): penanda alarm basi pasca-downtime
+- `reminder_attempts` (`INTEGER`, default 0)
 - `planned_date` (`DATE`, NOT NULL): tanggal rencana pengerjaan
 - `order_id` (`UUID`, FK ke `orders.id`, `ON DELETE SET NULL`)
 - `rollover_count` (`INTEGER`, default 0)
 - `completed_at` (`TIMESTAMPTZ`, NULL)
-- `source_message_id` (`VARCHAR(255)`, NULL)
 - `dedupe_key` (`VARCHAR(64)`, UNIQUE, NULL): `sha1(source_message_id | lower(trim(title)) | due_at)`
 - `created_via` (`TodoCreatedVia`, default `CHAT`)
 - `calendar_event_id` (`VARCHAR(255)`, NULL)
@@ -343,7 +354,9 @@ Whitelist pengirim pesan WhatsApp yang diterima bot.
 - `phone_e164` (`VARCHAR(20)`, NULL)
 - `label` (`VARCHAR(100)`, NULL)
 - `is_owner` (`BOOLEAN`, default false)
+- `is_primary` (`BOOLEAN`, NOT NULL, default false): nomor utama owner penerima alert sistem
 - `created_at` (`TIMESTAMPTZ`, default `now()`)
+- **Indeks:** `authorized_numbers_one_primary_idx` (UNIQUE pada `is_primary` WHERE `is_primary = true`)
 
 
 ### 3.6b `customer_sessions`
@@ -391,9 +404,10 @@ Konfigurasi provider model bahasa aktif.
 - `price_input_per_mtok` (`NUMERIC(10,4)`, NULL)
 - `price_output_per_mtok` (`NUMERIC(10,4)`, NULL)
 - `is_active` (`BOOLEAN`, default true)
+- `is_fallback` (`BOOLEAN`, NOT NULL, default false): model cadangan otomatis saat provider utama gagal
 - `created_at` (`TIMESTAMPTZ`, default `now()`)
 - `updated_at` (`TIMESTAMPTZ`, default `now()`)
-
+- **Indeks:** `llm_configs_one_fallback_idx` (UNIQUE pada `is_fallback` WHERE `is_fallback = true`)
 ### 3.10 `oauth_tokens`
 Penyimpanan kredensial OAuth2 Google API terenkripsi.
 - `id` (`UUID`, PK, default `gen_random_uuid()`)
@@ -468,6 +482,55 @@ Log operasional dan kegagalan sistem.
 - `context` (`JSONB`, NULL)
 - **Indeks:** `(ts, level)`
 
+
+### 3.16 `pipeline_configs`
+Menyimpan konfigurasi graf visual alur operasional kanvas Studio Alur.
+- `id` (`INTEGER`, PK, default 1, CHECK `id = 1`)
+- `name` (`VARCHAR(150)`, NOT NULL, default `"Default Pipeline"`)
+- `preset_key` (`VARCHAR(50)`, NOT NULL, default `"FLORIST_DECOR"`)
+- `version` (`INTEGER`, NOT NULL, default 1): penomoran versi optimistik
+- `config_json` (`JSONB`, NOT NULL): struktur lengkap nodes dan edges kanvas
+- `created_at` (`TIMESTAMPTZ`, default `now()`)
+- `updated_at` (`TIMESTAMPTZ`, default `now()`)
+
+### 3.17 `pipeline_config_versions`
+Riwayat snapshot versi konfigurasi alur visual untuk mendukung audit dan rollback.
+- `id` (`UUID`, PK, default `gen_random_uuid()`)
+- `pipeline_id` (`INTEGER`, NOT NULL, default 1)
+- `version` (`INTEGER`, NOT NULL)
+- `config_json` (`JSONB`, NOT NULL): snapshot graf alur pada versi tersebut
+- `actor` (`VARCHAR(100)`, NOT NULL, default `"system"`)
+- `notes` (`TEXT`, NULL)
+- `created_at` (`TIMESTAMPTZ`, default `now()`)
+- **Indeks:** `(pipeline_id, version)`
+
+### 3.18 `pending_confirmations`
+Token konfirmasi dua langkah untuk tindakan destruktif atau massal oleh owner.
+- `id` (`UUID`, PK, default `gen_random_uuid()`)
+- `owner_chat_id` (`VARCHAR(100)`, NOT NULL)
+- `action` (`VARCHAR(50)`, NOT NULL): misal `DELETE`, `CANCEL`, `BULK_COMPLETE`
+- `payload_json` (`JSONB`, NOT NULL): parameter aksi yang ditahan
+- `preview_text` (`TEXT`, NOT NULL)
+- `created_message_id` (`VARCHAR(255)`, NULL)
+- `expires_at` (`TIMESTAMPTZ`, NOT NULL): batas waktu konfirmasi (5 menit)
+- `executed_at` (`TIMESTAMPTZ`, NULL): timestamp saat konfirmasi dieksekusi
+- `created_at` (`TIMESTAMPTZ`, default `now()`)
+- **Indeks:** `(owner_chat_id, expires_at)`
+
+### 3.19 `scheduler_locks`
+Kunci sewa terdistribusi atomik untuk mencegah eksekusi tumpang tindih pada scheduler tick.
+- `name` (`VARCHAR(50)`, PK): pengidentifikasi kunci (misal `tick`)
+- `locked_at` (`TIMESTAMPTZ`, NOT NULL, default `now()`)
+- `expires_at` (`TIMESTAMPTZ`, NOT NULL): masa berlaku sewa kunci (55 detik)
+- `locked_by` (`VARCHAR(100)`, NOT NULL): identitas worker pemilik kunci
+
+### 3.20 `runtime_flags`
+Penyimpanan status runtime persisten yang bertahan melintasi restart container.
+- `key` (`VARCHAR(50)`, PK): misal `WAHA_CIRCUIT_BREAKER`
+- `value` (`VARCHAR(255)`, NOT NULL)
+- `expires_at` (`TIMESTAMPTZ`, NULL): masa berlaku flag runtime
+- `metadata` (`JSONB`, NULL)
+- `updated_at` (`TIMESTAMPTZ`, default `now()`)
 ---
 
 ## 4. PostgreSQL View: `v_active_todos`
