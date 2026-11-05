@@ -113,9 +113,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const testViolations = validateWorkflowTriggers(tmpPath, allowed);
       if (testViolations.length === 0) {
         console.error("Fixture negatif GAGAL: trigger tak dikenal tidak tertangkap!");
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
         process.exit(1);
       }
       console.log("Fixture negatif SUKSES: trigger tak dikenal berhasil ditolak.");
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
       process.exit(0);
     } finally {
       if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);

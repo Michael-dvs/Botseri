@@ -1780,3 +1780,46 @@ Menerapkan kerangka kerja privasi data pelanggan menyeluruh:
   ALTER TABLE "bot_settings" DROP COLUMN IF EXISTS "ai_form_fallback_requires_paid_model";
   ALTER TABLE "bot_settings" DROP COLUMN IF EXISTS "customer_data_retention_days";
   ```
+
+## [2026-11-05] S13: Staging, Test Integrasi, dan Evaluasi Prompt (P2)
+
+### 1. Ringkasan Perbaikan
+Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terotomatisasi, serta restrukturisasi template prompt:
+1. **Profil Staging Terisolasi (`docker-compose.staging.yml`):** Konfigurasi Docker Compose dengan database terpisah (`botseri_staging`), port terisolasi (3001, 3002, 5433, 5679), `WAHA_MOCK_OUTBOUND=1`, dan `WAHA_FAST_TEST=1` tanpa Cloudflare tunnel.
+2. **Otomasi Staging (`scripts/staging-up.sh`):** Skrip otomasi startup, migrasi database staging, dan seeding data awal.
+3. **Seeding Terproteksi (`scripts/staging-seed.ts`):** Validasi ketat `DATABASE_URL` yang menolak eksekusi jika tidak mengarah ke database staging, menginisialisasi data terstandarisasi dengan prefiks `TEST-`.
+4. **Suite Test Integrasi (`dashboard/tests/integration/pipeline-e2e.test.ts`):** Mengimplementasikan 8 skenario integrasi menyeluruh mencakup alur pelanggan baru, formulir tidak lengkap, siklus mute-digest-unmute, konfirmasi destruktif dua langkah idempoten, alarm dedup, validasi graf dan kontrol versi optimistik, antrean prioritas P0 vs P2, serta failover LLM gateway 429.
+5. **Evaluasi Prompt Otomatis (`scripts/eval-prompt.ts` & `dashboard/tests/prompt-eval/cases.yaml`):** Membangun suite 30 kasus ucapan Owner dengan validasi ekspektasi tool, parameter, dan kata terlarang; mendukung mode `--mock` (deterministik di CI) dan `--live` (manual) dengan ambang kelulusan 100% pada kategori keamanan prompt injection dan tindakan destruktif.
+6. **Restrukturisasi Prompt Kanonik (`dashboard/src/lib/prompt/templates/base.id.md`):** Menata ulang template prompt sistem menjadi modul dengan ID stabil (`R-SAPA`, `R-BUAT-TUGAS`, `R-WAKTU`, `R-LIHAT-TUGAS`, `R-PESANAN`, `R-KONFIRMASI`, `R-UNTRUSTED`, `R-GAYA`), membersihkan rujukan aturan yang membingungkan, dan memangkas ukuran menjadi 6.716 karakter (anggaran <= 9.000 karakter).
+7. **Peningkatan Smoke Test (`scripts/smoke.sh`):** Menambahkan penghitung dinamis `PASSED_COUNT/TOTAL_COUNT`, pemeriksaan read-only `get-orders`, auth guard `/api/pipeline`, dan indikator migrasi pada healthcheck.
+8. **Integrasi Pipeline CI (`.github/workflows/ci.yml`):** Memperbarui CI dengan service container PostgreSQL, pengujian integrasi Vitest, dan evaluasi prompt dalam mode aman.
+
+### 2. Berkas Dibuat & Dimodifikasi
+
+| Path Berkas | Status | Deskripsi Perubahan |
+|---|---|---|
+| `docker-compose.staging.yml` | Baru | Konfigurasi Docker Compose staging terisolasi (DB terpisah, mock WAHA, port khusus). |
+| `scripts/staging-up.sh` | Baru | Skrip bash otomasi menyalakan container staging, migrasi DB, dan seeding. |
+| `scripts/staging-seed.ts` & `dashboard/scripts/staging-seed.ts` | Baru | Skrip inisialisasi data uji staging dengan pengaman ketat `DATABASE_URL`. |
+| `dashboard/tests/integration/pipeline-e2e.test.ts` | Baru | Suite pengujian integrasi end-to-end 8 skenario menyeluruh. |
+| `dashboard/tests/prompt-eval/cases.yaml` | Baru | Kumpulan 30 kasus uji ucapan Owner untuk evaluasi prompt LLM. |
+| `scripts/eval-prompt.ts` | Baru | Skrip pengevaluasi prompt otomatis dengan mode `--mock` dan `--live`. |
+| `dashboard/src/lib/prompt/templates/base.id.md` | Modifikasi | Restrukturisasi prompt sistem agen dengan ID stabil dan pemangkasan anggaran karakter (6.716 chars). |
+| `scripts/smoke.sh` | Modifikasi | Penghitung dinamis pemeriksaan, pengecekan `get-orders`, auth guard pipeline, dan indikator migrasi. |
+| `.github/workflows/ci.yml` | Modifikasi | Integrasi service container PostgreSQL, test integrasi, dan evaluasi prompt di CI. |
+| `dashboard/package.json` | Modifikasi | Penambahan perintah `test:integration`, `test:all`, dan `eval:prompt`. |
+| `updates.md` | Modifikasi | Dokumentasi log kronologis perbaikan Section S13. |
+
+### 3. Hasil Verifikasi
+1. **Test Integrasi:** 8 dari 8 skenario lulus 100% (`npm run test:integration`).
+2. **Evaluasi Prompt:** 30 dari 30 kasus lulus 100% (`npm run eval:prompt -- --mock`), kategori keamanan 100% lulus.
+3. **Unit Test Suite:** 47 test file, 432 test cases lulus 100% (`npm test -- --run`).
+4. **Typecheck & Lint:** `npx tsc --noEmit` dan `npm run lint` lulus bersih (0 error, 0 warning).
+5. **Build Standalone:** `npm run build` sukses mengompilasi 27 rute Next.js.
+6. **Validasi Workflow n8n:** `./scripts/validate-workflows.sh` lulus bersih (2 file valid).
+7. **Pemindaian Rahasia:** `./scripts/check-secrets.sh` lulus bersih (0 rahasia terekspos).
+8. **Pengaman Basis Data:** `staging-seed.ts` terbukti langsung menghentikan proses saat `DATABASE_URL` mengarah ke database non-staging/produksi.
+9. **Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 4. Migrasi & Rollback
+- Migrasi: Tidak ada migrasi skema database baru pada Section S13 (skema tetap stabil).

@@ -21,8 +21,24 @@ jobs:
     defaults:
       run:
         working-directory: dashboard
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: botseri_test
+          POSTGRES_PASSWORD: botseri_test_password
+          POSTGRES_DB: botseri_staging
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
-      DATABASE_URL: "postgresql://dummy_user:dummy_password@localhost:5432/dummy_db"
+      DATABASE_URL: "postgresql://botseri_test:botseri_test_password@localhost:5432/botseri_staging"
       SESSION_SECRET: "ci_dummy_session_secret_for_build_purposes_only_32_chars"
       ENCRYPTION_KEY: "Y2ktZHVtbXktZW5jcnlwdGlvbi1rZXktMzJieXRlcw=="
       INTERNAL_API_TOKEN: "ci_dummy_internal_api_token"
@@ -31,6 +47,8 @@ jobs:
       WAHA_SESSION: "default"
       TZ_DEFAULT: "Asia/Jakarta"
       NEXT_TELEMETRY_DISABLED: "1"
+      WAHA_FAST_TEST: "1"
+      WAHA_MOCK_OUTBOUND: "1"
 
     steps:
       - name: Checkout code
@@ -58,8 +76,18 @@ jobs:
       - name: TypeScript typecheck
         run: npx tsc --noEmit
 
+      - name: Scan secrets in repo
+        working-directory: .
+        run: ./scripts/check-secrets.sh
+
       - name: Unit test suite
         run: npm test -- --run
+
+      - name: Integration test suite
+        run: npm run test:integration
+
+      - name: Evaluasi prompt aman (mock mode)
+        run: npm run eval:prompt -- --mock
 
       - name: Next.js standalone build
         run: npm run build
@@ -68,9 +96,6 @@ jobs:
         working-directory: .
         run: ./scripts/validate-workflows.sh
 
-      - name: Scan secrets in repo
-        working-directory: .
-        run: ./scripts/check-secrets.sh
       - name: Lint shell scripts with shellcheck
         working-directory: .
         run: |

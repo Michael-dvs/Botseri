@@ -1,0 +1,1 @@
+../../scripts/staging-seed.ts
