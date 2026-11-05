@@ -51,6 +51,7 @@ function response(
   intent: "SUBMIT_ORDER" | null = null,
   customerPhone: string | null = null,
   triggerType?: string,
+  messageText?: string | null,
 ) {
   return NextResponse.json({
     accept,
@@ -61,6 +62,8 @@ function response(
     reply_to_chat_id: chatId,
     reply_text: replyText,
     is_owner: role === "OWNER",
+    body: messageText ?? "",
+    message_text: messageText ?? "",
     ...(triggerType ? { trigger_type: triggerType } : {}),
     ...(role ? { role } : {}),
     ...(customerPhone ? { customer_phone: customerPhone } : {}),
@@ -519,6 +522,8 @@ export async function POST(request: Request) {
         "CUSTOMER",
         "SUBMIT_ORDER",
         partnerPhone,
+        undefined,
+        input.body ?? "",
       );
     }
     return response(false, "OWNER_MANUAL_MESSAGE", null, targetChatId);
@@ -684,5 +689,7 @@ export async function POST(request: Request) {
     "CUSTOMER",
     isOrder ? "SUBMIT_ORDER" : null,
     validCustomerPhone,
+    undefined,
+    input.body ?? "",
   );
 }

@@ -25,6 +25,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Perbaikan Penyimpanan current_router_id, Auto-Resolve Root Router, & Eliminasi Silent Drops](#2026-11-05-perbaikan-penyimpanan-current_router_id-auto-resolve-root-router--eliminasi-silent-drops)
 - [[2026-11-05] Hotfix Kritis: Eliminasi Silent Drops & Jaminan Eksekusi Fallback customer/handle](#2026-11-05-hotfix-kritis-eliminasi-silent-drops--jaminan-eksekusi-fallback-customerhandle)
 - [[2026-11-05] Hotfix: Pembatasan Timeout LangChain n8n & Isolasi Ketat Inbound Pelanggan](#2026-11-05-hotfix-pembatasan-timeout-langchain-n8n--isolasi-ketat-inbound-pelanggan)
+- [[2026-11-05] Hotfix: Penerusan Body Pesan di Accept & Pemetaan Defensif Customer Handle n8n](#2026-11-05-hotfix-penerusan-body-pesan-di-accept--pemetaan-defensif-customer-handle-n8n)
 
 ---
 
@@ -2142,4 +2143,40 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 5. Known Issues / Catatan Operasional
 - Pesan pelanggan dijamin terisolasi 100% dan tidak pernah mencapai sub-graf LangChain AI Agent.
+
+## [2026-11-05] Hotfix: Penerusan Body Pesan di Accept & Pemetaan Defensif Customer Handle n8n
+
+### 1. Ringkasan Pekerjaan
+1. **Penerusan Field `body` & `message_text` pada Endpoint `inbound/accept`:**
+   - Memperbarui fungsi pembantu `response(...)` di `dashboard/src/app/api/internal/inbound/accept/route.ts` dengan parameter opsional `messageText?: string | null` dan menyertakan field `body: messageText ?? ""` serta `message_text: messageText ?? ""` pada objek respon JSON.
+   - Memastikan saat respon penerimaan pesan dipanggil, teks pesan `input.body` diteruskan sebagai nilai `messageText`.
+2. **Pemetaan Defensif Berlapis pada Node `Customer Handle` di n8n:**
+   - Memperbarui parameter `jsonBody` pada node `Customer Handle` di `n8n-engine/workflows/botseri-inbound-agent.json` agar mengambil teks pesan, nomor telepon, dan ID pesan dengan urutan prioritas berlapis:
+     - `message_text`: `$json.message_text || $json.body || $('Accept').item.json.message_text || $('Accept').item.json.body || $('Filter Event').item.json.payload?.body || $('Filter Event').item.json.body || $('Webhook').item.json.body?.payload?.body || ''`
+     - `customer_phone`: `$json.customer_phone || $json.phone_e164 || $json.chat_id || $('Accept').item.json.customer_phone || $('Filter Event').item.json.payload?.from || $('Filter Event').item.json.from || ''`
+     - `message_id`: `$json.message_id || $('Accept').item.json.message_id || $('Filter Event').item.json.payload?.id || $('Filter Event').item.json.id || ('msg-' + Date.now())`
+   - Menjamin nilai `message_text` tidak pernah kosong saat diteruskan ke `/api/internal/customer/handle`.
+3. **Deploy Ulang Workflow ke Runtime n8n:**
+   - Menjalankan re-import workflow ke kontainer `botseri-n8n` via CLI `n8n import:workflow`, re-aktivasi, dan me-restart kontainer.
+
+### 2. Commit Git
+- Commit format: `fix: teruskan body pesan di accept dan amankan message_text customer handle n8n`
+
+### 3. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada perbaikan ini.
+
+### 4. Bukti Verifikasi
+1. **Unit Test Suite Lengkap:** `npm test -- --run` · 50 test files, 454 test cases passed (100% lulus, exit code 0).
+2. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% lulus, exit code 0).
+3. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · 30 passed (100% lulus, exit code 0).
+4. **TypeScript Typecheck:** `npx tsc --noEmit` · Lulus bersih (0 error).
+5. **ESLint:** `npm run lint` · Lulus bersih (0 warning, 0 error).
+6. **Next.js Standalone Build:** `npm run build` · 27 rute berhasil dikompilasi (exit code 0).
+7. **Workflow Validation:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+8. **Secret Scanner:** `./scripts/check-secrets.sh` · 0 secret terekspos (exit code 0).
+9. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (14/14 PASS, exit code 0).
+10. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 5. Known Issues / Catatan Operasional
+- Teks pesan pelanggan kini terbukti 100% mengalir dari webhook masuk WAHA melalui Accept hingga Customer Handle tanpa risiko terhapus atau kosong di antarmuka n8n.
 

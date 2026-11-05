@@ -955,7 +955,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ customer_phone: $('Accept').item.json.customer_phone || $('Accept').item.json.phone_e164 || $('Filter Event').item.json.payload.from, message_text: $('Filter Event').item.json.payload.body || '', message_id: $('Filter Event').item.json.payload.id || null, from_me: $('Filter Event').item.json.payload.fromMe === true, intent: $('Accept').item.json.intent || null }) }}",
+        "jsonBody": "={{ JSON.stringify({ customer_phone: $json.customer_phone || $json.phone_e164 || $json.chat_id || $('Accept').item.json.customer_phone || $('Filter Event').item.json.payload?.from || $('Filter Event').item.json.from || '', message_text: $json.message_text || $json.body || $('Accept').item.json.message_text || $('Accept').item.json.body || $('Filter Event').item.json.payload?.body || $('Filter Event').item.json.body || $('Webhook').item.json.body?.payload?.body || '', message_id: $json.message_id || $('Accept').item.json.message_id || $('Filter Event').item.json.payload?.id || $('Filter Event').item.json.id || ('msg-' + Date.now()), from_me: Boolean($json.from_me === true || $('Filter Event').item.json.payload?.fromMe === true), intent: $json.intent || $('Accept').item.json.intent || null }) }}",
         "options": {
           "timeout": 30000
         }
