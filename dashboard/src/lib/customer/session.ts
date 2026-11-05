@@ -40,6 +40,7 @@ export async function unmuteCustomerSessionByOrder(
   const sessions = await prisma.customerSession.findMany({
     where: {
       phone_e164: { in: uniquePhones },
+      state: "PAUSED_FOR_OWNER",
     },
   });
 

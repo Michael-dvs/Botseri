@@ -26,7 +26,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Hotfix Kritis: Eliminasi Silent Drops & Jaminan Eksekusi Fallback customer/handle](#2026-11-05-hotfix-kritis-eliminasi-silent-drops--jaminan-eksekusi-fallback-customerhandle)
 - [[2026-11-05] Hotfix: Pembatasan Timeout LangChain n8n & Isolasi Ketat Inbound Pelanggan](#2026-11-05-hotfix-pembatasan-timeout-langchain-n8n--isolasi-ketat-inbound-pelanggan)
 - [[2026-11-05] Hotfix: Penerusan Body Pesan di Accept & Pemetaan Defensif Customer Handle n8n](#2026-11-05-hotfix-penerusan-body-pesan-di-accept--pemetaan-defensif-customer-handle-n8n)
-
+- [[2026-11-05] Forensik & Perbaikan Drop Balasan Sapaan & Guard Unmute Sesi Pelanggan](#2026-11-05-forensik--perbaikan-drop-balasan-sapaan--guard-unmute-sesi-pelanggan)
 ---
 
 ### Format Standar Entri Pembaruan
@@ -2179,4 +2179,58 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 5. Known Issues / Catatan Operasional
 - Teks pesan pelanggan kini terbukti 100% mengalir dari webhook masuk WAHA melalui Accept hingga Customer Handle tanpa risiko terhapus atau kosong di antarmuka n8n.
+
+
+## [2026-11-05] Forensik & Perbaikan Drop Balasan Sapaan & Guard Unmute Sesi Pelanggan
+
+### 1. Ringkasan Akar Masalah & Solusi Teknis
+1. **Akar Masalah Utama (Auto-Heal Session Mutating Inbound State):**
+   - Pada `dashboard/src/app/api/internal/inbound/accept/route.ts`, terdapat pemanggilan `unmuteCustomerSessionByOrder` tanpa pengecekan status sesi pelanggan saat tidak ada order aktif.
+   - Fungsi `unmuteCustomerSessionByOrder` di `dashboard/src/lib/customer/session.ts` secara membabi-buta meng-update SEMUA sesi dengan nomor telepon yang cocok ke status `ACTIVE` dan menghapus `metadata.draft`.
+   - Akibatnya, sesi yang baru saja dibuat atau sedang berada di `AWAITING_CHOICE` langsung terdorong ke state `ACTIVE`.
+   - Ketika pelanggan mengirim pesan berikutnya di state `ACTIVE`, mesin alur mengembalikan balasan sapaan berulang (T1).
+   - Karena balasan sapaan identik dikirim dalam jendela waktu 45 detik, layer pengiriman keluar (`dashboard/src/app/api/internal/waha/send/route.ts`) menganggapnya sebagai duplikat (`DUPLICATE_OUTBOUND_SUPPRESSED`), sehingga tidak ada pesan yang sampai ke WhatsApp pelanggan (silent drop).
+2. **Akar Masalah Kedua (Optimistic Concurrency Fallback & AWAITING_ORDER Guard):**
+   - Pada `dashboard/src/app/api/internal/customer/handle/route.ts`, penjagaan `if (session.state === "AWAITING_ORDER")` saat action berupa `SEND_GREETING` mengembalikan `replies: []`.
+   - Selain itu, kegagalan update konkurensi optimistik mengembalikan `replies: []` tanpa peringatan.
+3. **Solusi Teknis:**
+   - Di `dashboard/src/lib/customer/session.ts`: Membatasi query `unmuteCustomerSessionByOrder` hanya untuk sesi dengan `state: "PAUSED_FOR_OWNER"`.
+   - Di `dashboard/src/app/api/internal/inbound/accept/route.ts`: Menambahkan guard ketat `if (!activeOrder && customerSession && customerSession.state === "PAUSED_FOR_OWNER" && !customerSession.paused_at)` sebelum memanggil pembuka jeda.
+   - Dibuat skrip pengujian reproduksi deterministik `scripts/test-e2e-incoming.ts` yang menguji 6 skenario berurutan (sapaan @c.us, pilihan 1, sapaan @lid, pilihan 3 katalog, pilihan 1 pasca-katalog, dan input fallback).
+
+### 2. Status Hipotesis H1 s.d. H10
+| Kode | Deskripsi Hipotesis | Status | Bukti / Catatan |
+|---|---|---|---|
+| H1 | Filter Event n8n menjatuhkan pesan kedua | TERBANTAH | Eksekusi n8n 3456 dan 3457 mencatat pesan '1' dan '3' berhasil lolos Filter Event tanpa diblokir. |
+| H2 | Case sensitivity pada Switch Role n8n | TERBANTAH | Switch Role memakai aturan eksplisit `$json.role === 'CUSTOMER'` dan `$json.is_owner === false`. Pada pesan kedua, rute tetap masuk ke cabang Customer Handle. |
+| H3 | Payload terpotong atau kosong pada Customer Handle n8n | TERBANTAH | Pemetaan defensif pada node Customer Handle n8n berhasil meneruskan `message_text` dan `customer_phone`. |
+| H4 | Unresolvable LID atau format nomor @lid | TERBANTAH | Eksekusi pesan WAHA menyertakan `remoteJidAlt` berformat `62878...@s.whatsapp.net`, fungsi `resolveSenderE164` sukses mengekstrak nomor E.164. |
+| H5 | Deduplikasi pesan (message_id) menjatuhkan pesan sah | TERBANTAH | Setiap pesan masuk memiliki `message_id` unik dari WAHA/n8n; tidak ada deduplikasi inbound yang memblokir pesan sah. |
+| H6 | Webhook WAHA tidak sampai ke n8n | TERBANTAH | Log kontainer `botseri-n8n` membuktikan webhook tiba secara konsisten (HTTP 200 Received). |
+| H7 | Pengiriman ke WAHA gagal atau silent drop di WAHA | TERBUKTI | Log `message_log` menunjukkan entri `DUPLICATE_OUTBOUND_SUPPRESSED` karena teks balasan sapaan yang identik dikirim berulang kali dalam durasi < 45 detik. |
+| H8 | Sesi pelanggan ter-reset atau ter-pause tidak sah | TERBUKTI | Sesi ter-update paksa ke `ACTIVE` oleh `unmuteCustomerSessionByOrder` di rute `inbound/accept` pada setiap pesan masuk saat order aktif kosong. |
+| H9 | Perbedaan format input teks atau karakter tak terlihat | TERBANTAH | Input '1', '2', '3' masuk sebagai string bersih tanpa whitespace anomali. |
+| H10 | Rute dashboard menolak atau menjatuhkan secara senyap | TERBUKTI | Karena sesi terdorong ke `ACTIVE`, `customer/handle` mengirim ulang T1 yang kemudian ditekan oleh filter duplikasi outbound di dashboard. |
+
+### 3. Commit Git
+- Commit format: `fix: batasi auto-unmute sesi hanya untuk PAUSED_FOR_OWNER dan eliminasi drop balasan`
+
+### 4. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada perbaikan ini.
+- Rollback: Jalankan `git revert HEAD` jika ingin mengembalikan perubahan kode.
+
+### 5. Bukti Verifikasi
+1. **Pengujian Reproduksi Deterministik E2E:** `npx tsx scripts/test-e2e-incoming.ts` (6/6 langkah PASS, 100% Lulus).
+2. **Unit Test Suite Lengkap:** `npm test -- --run` (50 test files, 454 test cases passed, 100% Lulus).
+3. **Integration Test Suite:** `npm run test:integration` (8 passed, 100% Lulus).
+4. **Prompt Evaluation:** `npm run eval:prompt -- --mock` (30 passed, 100% Lulus).
+5. **TypeScript Typecheck & ESLint:** `npx tsc --noEmit && npm run lint` (0 error, 0 warning).
+6. **Next.js Standalone Build:** `npm run build` (27 rute berhasil dikompilasi).
+7. **Workflow Validation:** `./scripts/validate-workflows.sh` (2 workflow files valid).
+8. **Secret Scanner:** `./scripts/check-secrets.sh` (0 secret terekspos).
+9. **Smoke Test:** `./scripts/smoke.sh` (14/14 pemeriksaan lulus, exit code 0).
+10. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 6. Known Issues / Catatan Operasional
+- Sesi pelanggan yang sedang dalam menu `AWAITING_CHOICE` tidak akan pernah lagi terganggu atau terdorong ke `ACTIVE` secara tidak sengaja oleh pesan masuk baru.
 

@@ -669,8 +669,8 @@ export async function POST(request: Request) {
     );
   }
 
-  // Auto-Heal: Jika activeOrder TIDAK ADA, pastikan sesi pelanggan tidak terkunci jeda
-  if (!activeOrder && customerSession) {
+  // Auto-Heal: Jika activeOrder TIDAK ADA dan sesi sedang ter-pause oleh order lama, pulihkan sesi
+  if (!activeOrder && customerSession && customerSession.state === "PAUSED_FOR_OWNER" && !customerSession.paused_at) {
     await unmuteCustomerSessionByOrder({
       customer_chat_id: targetChatId,
       customer_contact: validCustomerPhone,

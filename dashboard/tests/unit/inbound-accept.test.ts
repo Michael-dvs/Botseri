@@ -562,12 +562,15 @@ describe("POST /api/internal/inbound/accept", () => {
     customerSessionFindUniqueMock.mockResolvedValue({
       id: "sess-heal-1",
       phone_e164: "+6289999999999",
+      state: "PAUSED_FOR_OWNER",
+      paused_at: null,
       metadata: { waiting_since: "2026-11-04T10:00:00Z", unread_count: 2 },
     });
     customerSessionFindManyMock.mockResolvedValue([
       {
         id: "sess-heal-1",
         phone_e164: "+6289999999999",
+        state: "PAUSED_FOR_OWNER",
         metadata: { waiting_since: "2026-11-04T10:00:00Z", unread_count: 2 },
       },
     ]);

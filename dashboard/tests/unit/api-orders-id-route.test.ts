@@ -86,6 +86,7 @@ describe("PATCH /api/orders/[id]", () => {
       expect.objectContaining({
         where: {
           phone_e164: { in: expect.arrayContaining(["628123456789", "+628123456789"]) },
+          state: "PAUSED_FOR_OWNER",
         },
       })
     );
