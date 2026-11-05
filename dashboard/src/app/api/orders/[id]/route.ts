@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { log } from "@/lib/logger";
-import { softDeleteOrder } from "@/lib/orders/service";
+import { softDeleteOrder, releaseCustomerSession } from "@/lib/orders/service";
 import { unmuteCustomerSessionByOrder } from "@/lib/customer/session";
 const uuidSchema = z.string().uuid();
 
@@ -159,9 +159,15 @@ export async function DELETE(
   }
 
   try {
-    await softDeleteOrder(params.id, "dashboard_user");
+    const order = await softDeleteOrder(params.id, "dashboard_user");
+    if (order.customer_chat_id || order.customer_contact) {
+      await releaseCustomerSession(order.customer_chat_id || order.customer_contact);
+    }
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({
+      ok: true,
+      message: "Pesanan berhasil dihapus dan sesi pelanggan telah dibuka.",
+    });
   } catch (error) {
     log("ERROR", "api.orders", "delete failed", { id: params.id }, error);
     return NextResponse.json(

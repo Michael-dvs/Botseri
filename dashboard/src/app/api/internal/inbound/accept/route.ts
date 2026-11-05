@@ -606,10 +606,27 @@ export async function POST(request: Request) {
   // 7. Bot Mute Policy & Auto-Heal: Periksa pesanan aktif pelanggan via customer_chat_id & fallback
   const activeOrder = await getActiveOrderForCustomer(targetChatId, validCustomerPhone);
 
-  const trimmedCustomerBody = (input.body || "").trim();
-  const isMenuBypass = /^(menu|baru)[.! ]*$/i.test(trimmedCustomerBody);
+  const rawText = (input.body || "").trim().toLowerCase();
+  const isBypassKeyword = /^(menu|baru|order baru|pesan baru|halo|hi|batal|restart)[.! ]*$/i.test(rawText);
 
-  if (activeOrder && gate.enabled && gate.mute_bot_on_active_order && !isMenuBypass) {
+  if (isBypassKeyword && customerSession) {
+    const sessionMeta = (customerSession.metadata as Record<string, unknown>) || {};
+    await prisma.customerSession.update({
+      where: { id: customerSession.id },
+      data: {
+        state: "AWAITING_CHOICE",
+        paused_at: null,
+        metadata: {
+          ...sessionMeta,
+          current_router_id: null,
+          retry_count: 0,
+          draft: null,
+        },
+      },
+    });
+  }
+
+  if (activeOrder && gate.enabled && gate.mute_bot_on_active_order && !isBypassKeyword) {
     const orderAgeHours = (Date.now() - new Date(activeOrder.created_at).getTime()) / (3600 * 1000);
     const maxMuteHours = gate.mute_max_hours ?? 48;
 
@@ -675,7 +692,7 @@ export async function POST(request: Request) {
       Date.now() - new Date(customerSession.paused_at).getTime() > pauseTtlHours * 3600 * 1000;
 
     // Jika belum kedaluwarsa dan BUKAN format pesanan: tolak pesan inbound agar bot tidak mengirim balasan spam (Cegah 429)
-    if (!isPausedExpired && !looksLikeOrderForm(input.body ?? "")) {
+    if (!isPausedExpired && !looksLikeOrderForm(input.body ?? "") && !isBypassKeyword) {
       const sessionMeta = (customerSession.metadata as Record<string, unknown>) || {};
       const currentWaitingSince = sessionMeta.waiting_since || new Date().toISOString();
       const currentUnreadCount = (typeof sessionMeta.unread_count === "number" ? sessionMeta.unread_count : 0) + 1;

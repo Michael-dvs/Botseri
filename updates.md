@@ -28,6 +28,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Hotfix: Penerusan Body Pesan di Accept & Pemetaan Defensif Customer Handle n8n](#2026-11-05-hotfix-penerusan-body-pesan-di-accept--pemetaan-defensif-customer-handle-n8n)
 - [[2026-11-05] Forensik & Perbaikan Drop Balasan Sapaan & Guard Unmute Sesi Pelanggan](#2026-11-05-forensik--perbaikan-drop-balasan-sapaan--guard-unmute-sesi-pelanggan)
 - [[2026-11-05] Aturan 3-Strike Fallback & Auto-Handover Minri pada Pilihan Pelanggan](#2026-11-05-aturan-3-strike-fallback--auto-handover-minri-pada-pilihan-pelanggan)
+- [[2026-11-05] Perbaikan Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft-Delete Orders](#2026-11-05-perbaikan-outbound-429-queue-mute-bypass-keyword-menubaru--soft-delete-orders)
 ---
 
 ### Format Standar Entri Pembaruan
@@ -2279,4 +2280,50 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 6. Known Issues / Catatan Operasional
 - Pelanggan yang salah memilih 3x berturut-turut akan langsung dijeda untuk penanganan manual oleh Minri. Jika pelanggan kemudian mengirim format pesanan lengkap, rute inbound otomatis membuka kembali jalur pemesanan.
+
+
+## [2026-11-05] Perbaikan Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft-Delete Orders
+
+### 1. Ringkasan Pekerjaan
+1. **Antrean Tunda Outbound Anti-429 & Retry n8n:**
+   - Pada `dashboard/src/lib/waha/humanizer.ts`, saat kuota sliding window (4 pesan / 60 detik) penuh, eksekusi ditahan secara asinkron (`await sleep(waitMs)`) hingga slot jendela waktu tersedia sebelum pesan dikirim ke WAHA (tanpa langsung melempar 429).
+   - Pada `dashboard/src/app/api/internal/waha/send/route.ts`, jika rate limit 429 terjadi pada pesan balasan bot (`CUSTOMER_REPLY`, `CUSTOM_REPLY`, `OWNER_DIGEST`, `TASK_ALARM`, `NEW_ORDER_ALERT`), endpoint mengembalikan status HTTP 202 Accepted (`{ ok: true, queued: true, warning: "OUTBOUND_RATE_LIMIT_DELAYED" }`) dan menjadwalkan pengiriman di latar belakang agar n8n tidak menerima AxiosError 429.
+   - Pada `n8n-engine/workflows/botseri-inbound-agent.json`, node "Kirim WhatsApp" ditambahkan opsi `retryOnFail: true`, `maxTries: 3`, dan `waitBetweenTries: 3000` (jeda 3 detik).
+2. **Bypass Mute Pelanggan via Kata Kunci (MENU, BARU, HALO):**
+   - Pada `dashboard/src/app/api/internal/inbound/accept/route.ts`, diperluas deteksi kata kunci bypass `/^(menu|baru|order baru|pesan baru|halo|hi|batal|restart)[.! ]*$/i`.
+   - Jika kata kunci bypass terdeteksi: bot tidak dibisukan (`accept: true, role: "CUSTOMER"`), status sesi di `customer_sessions` di-reset ke `AWAITING_CHOICE`, `paused_at` dinolkan, pointer `current_router_id` dibersihkan, dan draft dinolkan sehingga pelanggan dapat berinteraksi kembali dengan menu.
+   - Jika bukan kata kunci bypass dan pelanggan memiliki pesanan aktif: rute mengembalikan `accept: false, reason: "ACTIVE_ORDER_IN_PROGRESS_BOT_MUTED"`.
+3. **Standarisasi Soft Delete & Auto-Unmute Pesanan:**
+   - Pada `dashboard/src/app/api/orders/[id]/route.ts`, endpoint `DELETE` menggunakan fungsi terpusat `softDeleteOrder(params.id)` dan memastikan pelepasan kunci sesi via `releaseCustomerSession(order.customer_chat_id || order.customer_contact)`.
+   - Mengembalikan respon terstruktur `{ ok: true, message: "Pesanan berhasil dihapus dan sesi pelanggan telah dibuka." }`.
+   - Pada `dashboard/src/lib/orders/service.ts`, fungsi `releaseCustomerSession` meneruskan `customer_chat_id` dan `customer_contact` ke `unmuteCustomerSessionByOrder` agar dapat mencocokkan nomor telepon dengan akurat.
+
+### 2. Berkas yang Dimodifikasi
+1. `dashboard/src/lib/waha/humanizer.ts` · Penambahan penundaan asinkron pada `checkRateLimits` saat kuota 60 detik penuh.
+2. `dashboard/src/app/api/internal/waha/send/route.ts` · Penanganan fallback HTTP 202 Accepted dengan pengiriman tunda latar belakang untuk pesan bot.
+3. `n8n-engine/workflows/botseri-inbound-agent.json` · Konfigurasi retry on fail (3x percobaan, jeda 3000ms) pada node Kirim WhatsApp.
+4. `dashboard/src/app/api/internal/inbound/accept/route.ts` · Deteksi kata kunci bypass mute dan reset sesi pelanggan.
+5. `dashboard/src/app/api/orders/[id]/route.ts` · Standarisasi soft-delete dan auto-unmute pada rute DELETE pesanan.
+6. `dashboard/src/lib/orders/service.ts` · Penyesuaian `releaseCustomerSession` untuk kompatibilitas format kontak.
+7. `dashboard/tests/unit/waha-queue-mute-bypass.test.ts` · Berkas pengujian unit baru mencakup 5 skenario (bypass mute MENU/BARU, mute pesan biasa, soft delete & unmute, dan antrean 202 waha/send).
+
+### 3. Commit Git
+- Commit format: `fix: antrean tunda outbound 429 waha send, bypass mute kata kunci menu, dan soft delete order auto unmute`
+
+### 4. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database pada perbaikan ini.
+- Rollback: Jalankan `git revert HEAD` jika ingin mengembalikan perubahan kode.
+
+### 5. Bukti Verifikasi
+1. **Pengujian Unit Baru (`waha-queue-mute-bypass.test.ts`):** `npx vitest run tests/unit/waha-queue-mute-bypass.test.ts` · 5/5 tests passed (100% Lulus).
+2. **Unit Test Suite Lengkap:** `npm test -- --run` · 52 test files, 467 test cases passed (100% Lulus, exit code 0).
+3. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% Lulus, exit code 0).
+4. **TypeScript Typecheck & ESLint:** `npx tsc --noEmit && npm run lint` · 0 error, 0 warning.
+5. **Workflow Validation:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+6. **Skrip Simulasi E2E Terpadu (`scripts/test-e2e-incoming.ts`):** 9/9 langkah PASS (100% Lulus).
+7. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (exit code 0).
+8. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 6. Known Issues / Catatan Operasional
+- Pengiriman pesan keluar yang padat dalam waktu singkat kini secara otomatis ditunda secara halus atau dijadwalkan di antrean latar belakang sehingga n8n tidak akan lagi mengalami kegagalan AxiosError 429.
 

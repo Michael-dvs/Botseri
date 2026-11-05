@@ -180,6 +180,44 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     if (error instanceof HumanizerError) {
+      if (
+        error.status === 429 &&
+        (input.trigger_type === "CUSTOMER_REPLY" ||
+          input.trigger_type === "CUSTOM_REPLY" ||
+          input.trigger_type === "OWNER_DIGEST" ||
+          input.trigger_type === "TASK_ALARM" ||
+          input.trigger_type === "NEW_ORDER_ALERT")
+      ) {
+        log("WARN", "waha.send", "rate limit reached for bot reply, queueing in background with 202 Accepted", {
+          targetChatId,
+          trigger_type: input.trigger_type,
+        });
+
+        void (async () => {
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 4000));
+            await sendHumanizedMessage({
+              chatId: targetChatId,
+              text: textToSend,
+              replyToWaMessageId: input.reply_to_wa_message_id,
+              trigger: input.trigger_type as Trigger,
+            });
+          } catch (bgErr) {
+            log("ERROR", "waha.send", "background delayed send failed", { targetChatId }, bgErr);
+          }
+        })();
+
+        return NextResponse.json(
+          {
+            ok: true,
+            queued: true,
+            warning: "OUTBOUND_RATE_LIMIT_DELAYED",
+            message: "Pesan balasan bot dialihkan ke antrean tunda latar belakang.",
+          },
+          { status: 202 },
+        );
+      }
+
       return NextResponse.json(
         { ok: false, error: error.message, code: error.code },
         { status: error.status },

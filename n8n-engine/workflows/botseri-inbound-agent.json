@@ -768,7 +768,10 @@
               "batchSize": 1,
               "batchInterval": 2500
             }
-          }
+          },
+          "retryOnFail": true,
+          "maxTries": 3,
+          "waitBetweenTries": 3000
         }
       },
       "credentials": {

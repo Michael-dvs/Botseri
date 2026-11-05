@@ -162,7 +162,7 @@ export async function releaseCustomerSession(
     return 0;
   }
 
-  return unmuteCustomerSessionByOrder({ customer_chat_id: cleanChatId });
+  return unmuteCustomerSessionByOrder({ customer_chat_id: cleanChatId, customer_contact: cleanChatId });
 }
 
 /**

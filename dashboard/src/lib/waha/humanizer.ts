@@ -155,7 +155,11 @@ async function validateRecipient(
   }
 }
 
-async function checkRateLimits(chatId: string, priority: 0 | 1 | 2): Promise<void> {
+async function checkRateLimits(
+  chatId: string,
+  priority: 0 | 1 | 2,
+  opts?: HumanizeOptions,
+): Promise<void> {
   const now = Date.now();
   const window60s = now - 60_000;
   const window60m = now - 3_600_000;
@@ -165,8 +169,8 @@ async function checkRateLimits(chatId: string, priority: 0 | 1 | 2): Promise<voi
     sentTimestamps.shift();
   }
 
-  const count60s = sentTimestamps.filter((ts) => ts >= window60s).length;
-  const count60m = sentTimestamps.length;
+  let count60s = sentTimestamps.filter((ts) => ts >= window60s).length;
+  let count60m = sentTimestamps.length;
 
   // Reservasi Kuota:
   // Batas 4/menit: P0 boleh pakai slot ke-4, P1/P2 maksimal 3 slot/menit (1 slot direservasi untuk P0)
@@ -174,6 +178,18 @@ async function checkRateLimits(chatId: string, priority: 0 | 1 | 2): Promise<voi
   const maxMinute = priority === 0 ? 4 : 3;
   const maxHour = priority === 0 ? 25 : 20;
 
+  // Jika kuota jendela 60s sedang penuh, tahan eksekusi secara asinkron hingga slot jendela waktu tersedia
+  if (count60s >= maxMinute && !isFastTest() && !opts?.skipDelay) {
+    const oldestIn60s = sentTimestamps.filter((ts) => ts >= window60s)[0];
+    const waitMs = oldestIn60s ? Math.max(500, oldestIn60s + 60_000 - Date.now() + 250) : 1500;
+    if (waitMs > 0 && waitMs <= 30_000) {
+      await sleep(waitMs);
+      const updatedNow = Date.now();
+      const updatedWindow60s = updatedNow - 60_000;
+      count60s = sentTimestamps.filter((ts) => ts >= updatedWindow60s).length;
+      count60m = sentTimestamps.length;
+    }
+  }
   if (count60s >= maxMinute || count60m >= maxHour) {
     await recordEvent(
       "WARN",
@@ -350,7 +366,7 @@ async function executeSendMessage(
   checkCircuitBreaker();
 
   // 3. Cek Sliding-Window Rate Limiter & Reservasi Kuota
-  await checkRateLimits(opts.chatId, priority);
+  await checkRateLimits(opts.chatId, priority, opts);
 
   const bypass = opts.skipDelay || isFastTest();
 
