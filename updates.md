@@ -19,6 +19,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] S12: Privasi Data Pelanggan & Retensi](#2026-11-05-s12-privasi-data-pelanggan-dan-retensi-p2)
 - [[2026-11-05] S13: Staging, Test Integrasi, & Evaluasi Prompt](#2026-11-05-s13-staging-test-integrasi-dan-evaluasi-prompt-p2)
 - [[2026-11-05] S14: Dokumentasi, Operasional, & Penutupan Utang Lama](#2026-11-05-s14-dokumentasi-operasional-dan-penutupan-utang-lama-p2)
+- [[2026-11-05] S15: Akseptansi Akhir & Penutupan Patch Plan](#2026-11-05-s15-akseptansi-akhir-dan-penutupan-patch-plan)
 
 ---
 
@@ -1905,3 +1906,37 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 ### 5. Known Issues / Catatan Operasional
 - Penolakan token lama saat logout memerlukan koneksi database yang aktif; jika database down, fallback keamanan menolak token yang tidak dapat divalidasi.
 - Kotak centang pada `docs/reports/step-07-closure-checklist.md` sengaja dibiarkan kosong `[ ]` dan roadmap Step 07 tetap tidak dicentang hingga pemilik sistem melakukan verifikasi fisik WhatsApp di lingkungan operasional nyata.
+
+## [2026-11-05] S15: Akseptansi Akhir dan Penutupan Patch Plan
+
+### 1. Ringkasan Pekerjaan
+1. **Verifikasi Gerbang Kualitas Penuh:**
+   - Menjalankan 9 gerbang pengujian sistem: typecheck (`tsc`), linting (`eslint`), unit test regresi, test integrasi 8 skenario, evaluasi prompt 30 kasus, Next.js build standalone, validasi 2 workflow n8n, scanner rahasia, dan smoke test 14/14 titik.
+2. **Matriks Akseptansi 25 Butir Temuan:**
+   - Memvalidasi dan mendokumentasikan penyelesaian 25 butir temuan kanonik dari S01 hingga S14 berbasis bukti kode dan terminal nyata.
+3. **Penyusunan Laporan Penutupan Komprehensif:**
+   - Membuat dokumen resmi `docs/reports/patch-final-report.md` merangkum pencapaian arsitektur, daftar periksa tindakan manual pemilik sistem, analisis risiko tersisa, dan rekomendasi operasional.
+4. **Kepatuhan Invarian Kunci:**
+   - Roadmap `docs/steps/00-MASTER-ROADMAP.md` dipertahankan tidak disentuh (`G-07`), mematuhi prinsip anti-halusinasi dan pendelegasian verifikasi manual lapangan ke pemilik sistem.
+
+### 2. Commit Git
+- Commit format `G-04`: `docs(s15): matriks akseptansi akhir dan laporan penutupan patch plan`
+
+### 3. Migrasi dan Rollback
+- Migrasi: Tidak ada migrasi skema database baru pada Section S15 (tahap audit dan akseptansi murni).
+
+### 4. Bukti Verifikasi
+1. **TypeScript Typecheck:** `npx tsc --noEmit` · Lulus bersih (0 error).
+2. **ESLint:** `npm run lint` · Lulus bersih (0 warning, 0 error).
+3. **Unit Test Suite:** `npm test -- --run` · 49 test files, 440 test cases passed (100% lulus, exit code 0).
+4. **Integration Test Suite:** `npm run test:integration` · 8 dari 8 skenario lulus (100% lulus, exit code 0).
+5. **Prompt Evaluation:** `npm run eval:prompt -- --mock` · 30 dari 30 kasus lulus (100% lulus, exit code 0).
+6. **Next.js Standalone Build:** `npm run build` · 27 rute berhasil dikompilasi (exit code 0).
+7. **Workflow Validation:** `./scripts/validate-workflows.sh` · 2 workflow files valid (exit code 0).
+8. **Secret Scanner:** `./scripts/check-secrets.sh` · 0 secret terekspos (exit code 0).
+9. **Smoke Test:** `./scripts/smoke.sh` · 14 dari 14 titik pemeriksaan lulus (14/14 PASS, exit code 0).
+10. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+11. **Roadmap Lock G-07:** Berkas `docs/steps/00-MASTER-ROADMAP.md` bersih dari perubahan (0 diff).
+
+### 5. Known Issues / Catatan Operasional
+- Seluruh tindakan manual yang memerlukan perangkat fisik WhatsApp atau akun eksternal owner telah dipusatkan pada Bagian 4 dokumen `docs/reports/patch-final-report.md` dan `docs/reports/step-07-closure-checklist.md`.

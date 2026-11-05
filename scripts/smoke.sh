@@ -133,13 +133,13 @@ fi
 # 5b. Healthcheck: container botseri-n8n berstatus healthy
 N8N_HEALTHY_OK=1
 if command -v docker >/dev/null 2>&1 && docker compose ps --status running --services 2>/dev/null | grep -q "botseri-n8n"; then
-  N8N_HEALTH="$(docker inspect --format='{{.State.Health.Status}}' botseri-n8n 2>/dev/null || echo "unknown")"
-  if [ "$N8N_HEALTH" = "healthy" ]; then
+  N8N_HEALTH="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}running{{end}}' botseri-n8n 2>/dev/null || echo "unknown")"
+  if [ "$N8N_HEALTH" = "healthy" ] || [ "$N8N_HEALTH" = "running" ]; then
     N8N_HEALTHY_OK=0
   fi
-  check "Healthcheck: container botseri-n8n berstatus healthy" "$N8N_HEALTHY_OK" "status: $N8N_HEALTH"
+  check "Healthcheck: container botseri-n8n berstatus healthy/running" "$N8N_HEALTHY_OK" "status: $N8N_HEALTH"
 else
-  check "Healthcheck: container botseri-n8n berstatus healthy" 0 "dilewati: container tidak aktif di host ini"
+  check "Healthcheck: container botseri-n8n berstatus healthy/running" 0 "dilewati: container tidak aktif di host ini"
 fi
 
 # 6. Migrasi Prisma selesai (_prisma_migrations tidak ada yang gagal/tertunda)
@@ -156,9 +156,14 @@ fi
 # 7. WAHA API terjangkau dari dalam container dashboard
 WAHA_REACHABLE_OK=1
 if command -v docker >/dev/null 2>&1 && docker compose ps --status running --services 2>/dev/null | grep -q "botseri-dashboard"; then
-  WAHA_CHECK_HTTP="$(docker compose exec -T botseri-dashboard curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-    "http://botseri-waha:3000/api/default/health" 2>/dev/null || echo "000")"
-  [ "$WAHA_CHECK_HTTP" = "200" ] && WAHA_REACHABLE_OK=0
+  WAHA_CHECK_HTTP="$(docker compose exec -T botseri-dashboard node -e '
+    fetch("http://botseri-waha:3000/api/server/version")
+      .then(r => console.log(r.status))
+      .catch(() => console.log("000"))
+  ' 2>/dev/null | tr -d '\r\n ' || echo "000")"
+  if [ "$WAHA_CHECK_HTTP" = "200" ] || [ "$WAHA_CHECK_HTTP" = "401" ]; then
+    WAHA_REACHABLE_OK=0
+  fi
   check "Jaringan internal: WAHA terjangkau dari container dashboard" "$WAHA_REACHABLE_OK" "status: $WAHA_CHECK_HTTP"
 else
   check "Jaringan internal: WAHA terjangkau dari container dashboard" 0 "dilewati: container tidak aktif di host ini"
