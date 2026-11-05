@@ -413,6 +413,7 @@ export function runPipelineStep(
           actions.push({
             type: "UPDATE_SESSION",
             nextState: "AWAITING_CHOICE",
+            retryCount: 0,
             nextRouterId: nextActiveRouterId || null,
           });
           log.push(`Mengeksekusi cabang (${branch.label}): ${branchEdge.target}`);
@@ -478,6 +479,7 @@ export function runPipelineStep(
       actions.push({
         type: "UPDATE_SESSION",
         nextState: "AWAITING_ORDER",
+        retryCount: 0,
         nextRouterId: null,
       });
       log.push("Pelanggan memilih opsi 1 (Pesan). Mengirim formulir.");
@@ -548,8 +550,9 @@ export function runPipelineStep(
         type: "UPDATE_SESSION",
         nextState: "PAUSED_FOR_OWNER",
         pausedAt: new Date(),
+        retryCount: 0,
+        nextRouterId: null,
       });
-      log.push("Pelanggan memilih opsi 2 (Tanya). Mengaktifkan handover.");
 
       return {
         actions,
@@ -562,67 +565,97 @@ export function runPipelineStep(
       };
     }
 
-    // 5d. Input Tidak Dikenal (Fallback Otomatis & Port Fallback)
-    // a) Cek apakah port "fallback" pada router tersebut memiliki kabel koneksi ke node target
-    const fallbackEdge = graph.edges.find(
-      (e) =>
-        e.source === routerId &&
-        (e.sourceHandle === "branch_fallback" ||
-         e.sourceHandle === "fallback" ||
-         e.sourceHandle?.toLowerCase().includes("fallback"))
-    );
+    // 5d. Input Tidak Dikenal (Aturan 3-Strike Rule & Fallback)
+    const currentRetries = (ctx.retryCount || 0) + 1;
 
-    let fallbackText = "";
-    let nextRouterIdAfterFallback: string | undefined = routerId;
+    if (currentRetries < 3) {
+      // Kesalahan ke-1 dan ke-2
+      const fallbackEdge = graph.edges.find(
+        (e) =>
+          e.source === routerId &&
+          (e.sourceHandle === "branch_fallback" ||
+           e.sourceHandle === "fallback" ||
+           e.sourceHandle?.toLowerCase().includes("fallback"))
+      );
 
-    if (fallbackEdge) {
-      activeEdges.push(fallbackEdge.id);
-      visited.push(fallbackEdge.target);
-      const fallbackTargetNode = graph.nodes.find((n) => n.id === fallbackEdge.target);
-      if (fallbackTargetNode) {
-        const rawMsg = extractNodeMessageText(fallbackTargetNode);
-        if (rawMsg) {
-          fallbackText = renderPipelineTemplate(rawMsg, sampleVars);
-        }
-        const downstream = findDownstreamRouter(fallbackTargetNode.id, graph);
-        if (downstream) {
-          nextRouterIdAfterFallback = downstream.id;
+      let nextRouterIdAfterFallback: string | undefined = routerId;
+      if (fallbackEdge) {
+        activeEdges.push(fallbackEdge.id);
+        visited.push(fallbackEdge.target);
+        const fallbackTargetNode = graph.nodes.find((n) => n.id === fallbackEdge.target);
+        if (fallbackTargetNode) {
+          const downstream = findDownstreamRouter(fallbackTargetNode.id, graph);
+          if (downstream) {
+            nextRouterIdAfterFallback = downstream.id;
+          }
         }
       }
-    }
-
-    // b) Jika port "fallback" KOSONG / TIDAK TERHUBUNG:
-    if (!fallbackText) {
       const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
-      fallbackText =
+      const baseFallback =
         routerFallbackText ||
-        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai pilihan menu ya Kak.";
+        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai menu ya Kak.";
+      const fallbackMsg = `${baseFallback} (Kesempatan ${currentRetries}/3)`;
+      replies.push(fallbackMsg);
+      actions.push({
+        type: "SEND_MESSAGE",
+        text: fallbackMsg,
+        trigger_type: "CUSTOMER_REPLY",
+      });
+      actions.push({
+        type: "UPDATE_SESSION",
+        nextState: "AWAITING_CHOICE",
+        retryCount: currentRetries,
+        nextRouterId: nextRouterIdAfterFallback,
+      });
+      log.push(`Input tidak cocok (kesalahan ${currentRetries}/3). Mengirimkan pengingat format.`);
+
+      return {
+        actions,
+        nodeTrace: visited,
+        activeEdgeIds: activeEdges,
+        nextState: "AWAITING_CHOICE",
+        nextRouterId: nextRouterIdAfterFallback,
+        log,
+        replies,
+      };
+    } else {
+      // Kesalahan ke-3: Auto-Handover ke Minri (Owner)
+      const transitionMsg =
+        "Mohon maaf Kak, tampaknya pilihan belum sesuai 🙏\nAgar lebih mudah, chat Kakak kami teruskan langsung ke Minri (Admin Berseri) ya. Bot kami jeda sejenak, mohon ditunggu sebentar ya Kak! ☕🌸";
+      const ownerAlertMsg = `🔔 *Pemberitahuan: Bantuan Pelanggan* 🌸\n\nAda pelanggan yang salah memasukkan pilihan menu sebanyak 3x:\n• Nomor: ${ctx.customerPhone || sampleVars.customer_phone || "Pelanggan"}\n• Pesan Terakhir: "${(input.text || "").slice(0, 300)}"\n\nBot telah otomatis dijeda untuk nomor ini agar Minri bisa membantu secara langsung di WhatsApp.`;
+
+      replies.push(transitionMsg);
+      replies.push(ownerAlertMsg);
+
+      actions.push({
+        type: "SEND_MESSAGE",
+        text: transitionMsg,
+        trigger_type: "CUSTOMER_REPLY",
+      });
+      actions.push({
+        type: "SEND_MESSAGE",
+        text: ownerAlertMsg,
+        trigger_type: "OWNER_DIGEST",
+      });
+      actions.push({
+        type: "UPDATE_SESSION",
+        nextState: "PAUSED_FOR_OWNER",
+        pausedAt: new Date(),
+        retryCount: 0,
+        nextRouterId: null,
+      });
+      log.push("Input tidak cocok 3x berturut-turut. Mengaktifkan jeda dan meneruskan ke Minri.");
+
+      return {
+        actions,
+        nodeTrace: visited,
+        activeEdgeIds: activeEdges,
+        nextState: "PAUSED_FOR_OWNER",
+        nextRouterId: null,
+        log,
+        replies,
+      };
     }
-
-    replies.push(fallbackText);
-    actions.push({
-      type: "SEND_MESSAGE",
-      text: fallbackText,
-      trigger_type: "CUSTOMER_REPLY",
-    });
-    // c) PENTING: Pertahankan status sesi tetap AWAITING_CHOICE dan pertahankan current_router_id pada router aktif saat ini!
-    actions.push({
-      type: "UPDATE_SESSION",
-      nextState: "AWAITING_CHOICE",
-      retryCount: (ctx.retryCount || 0) + 1,
-      nextRouterId: nextRouterIdAfterFallback,
-    });
-    log.push("Input tidak cocok dengan kata kunci menu. Mengirimkan umpan balik format.");
-
-    return {
-      actions,
-      nodeTrace: visited,
-      activeEdgeIds: activeEdges,
-      nextState: "AWAITING_CHOICE",
-      nextRouterId: nextRouterIdAfterFallback,
-      log,
-      replies,
-    };
 
   }
 

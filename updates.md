@@ -27,6 +27,7 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Hotfix: Pembatasan Timeout LangChain n8n & Isolasi Ketat Inbound Pelanggan](#2026-11-05-hotfix-pembatasan-timeout-langchain-n8n--isolasi-ketat-inbound-pelanggan)
 - [[2026-11-05] Hotfix: Penerusan Body Pesan di Accept & Pemetaan Defensif Customer Handle n8n](#2026-11-05-hotfix-penerusan-body-pesan-di-accept--pemetaan-defensif-customer-handle-n8n)
 - [[2026-11-05] Forensik & Perbaikan Drop Balasan Sapaan & Guard Unmute Sesi Pelanggan](#2026-11-05-forensik--perbaikan-drop-balasan-sapaan--guard-unmute-sesi-pelanggan)
+- [[2026-11-05] Aturan 3-Strike Fallback & Auto-Handover Minri pada Pilihan Pelanggan](#2026-11-05-aturan-3-strike-fallback--auto-handover-minri-pada-pilihan-pelanggan)
 ---
 
 ### Format Standar Entri Pembaruan
@@ -2233,4 +2234,49 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 6. Known Issues / Catatan Operasional
 - Sesi pelanggan yang sedang dalam menu `AWAITING_CHOICE` tidak akan pernah lagi terganggu atau terdorong ke `ACTIVE` secara tidak sengaja oleh pesan masuk baru.
+
+
+## [2026-11-05] Aturan 3-Strike Fallback & Auto-Handover Minri pada Pilihan Pelanggan
+
+### 1. Ringkasan Masalah Runtime & Solusi
+1. **Masalah Runtime (Error 429 Rate Limit):**
+   - Ketika pelanggan mengirimkan masukan salah secara berulang-ulang dalam rentang waktu singkat, bot sebelumnya membalas setiap pesan dengan fallback secara terus-menerus.
+   - Hal ini memicu pembatas laju WAHA / Dashboard (HTTP 429 Too Many Requests: AxiosError) dan menyebabkan bot macet.
+2. **Solusi: Aturan 3 Kali Kesempatan (3-Strike Rule):**
+   - Melacak akumulasi kesalahan pelanggan di menu utama / sub-menu via kolom `metadata.retry_count` pada tabel `customer_sessions`.
+   - **Saat Input Benar (1, 2, atau 3):** Reset `metadata.retry_count = 0` dan proses cabang normal.
+   - **Saat Kesalahan 1 & 2 (`currentRetries < 3`):** Kirim pesan fallback pengingat format yang menyertakan informasi kesempatan `(Kesempatan ${currentRetries}/3)` dan pertahankan status sesi di `AWAITING_CHOICE`.
+   - **Saat Kesalahan 3 (`currentRetries >= 3`):**
+     - Kirim pesan transisi ramah ke pelanggan bahwa percakapan diteruskan langsung ke Minri (Admin Berseri).
+     - Ubah status sesi pelanggan ke `PAUSED_FOR_OWNER`, set `paused_at = new Date()`, `metadata.retry_count = 0`, dan `metadata.waiting_since = new Date()`.
+     - Kirim notifikasi WhatsApp ke Minri (Primary Owner) dengan template alert `🔔 *Pemberitahuan: Bantuan Pelanggan* 🌸` menggunakan `trigger_type: 'OWNER_DIGEST'` agar lolos kuota prioritas.
+3. **Perlindungan Inbound Gate (`inbound/accept/route.ts`):**
+   - Setiap pesan spam lanjutan saat status sesi `PAUSED_FOR_OWNER` (dan belum kedaluwarsa serta bukan format pesanan) langsung ditolak dengan `{ accept: false, reason: "SESSION_PAUSED_FOR_MANUAL_OWNER" }` tanpa menghasilkan balasan keluar apa pun, secara mutlak mengeliminasi risiko error 429.
+
+### 2. Berkas yang Dimodifikasi
+1. `dashboard/src/app/api/internal/customer/handle/route.ts` · Implementasi aturan 3-strike, format fallback kesempatan 1/3 dan 2/3, notifikasi Minri, dan reset retry_count pada pilihan valid.
+2. `dashboard/src/app/api/internal/inbound/accept/route.ts` · Penolakan inbound otomatis `SESSION_PAUSED_FOR_MANUAL_OWNER` saat sesi berstatus `PAUSED_FOR_OWNER`.
+3. `dashboard/src/lib/pipeline/engine.ts` · Penyelarasan logika 3-strike rule di simulator pipeline dan reset retryCount pada eksekusi cabang 1, 2, dan 3.
+4. `dashboard/tests/unit/pipeline-retry-limit.test.ts` · Berkas pengujian unit baru (8 skenario: engine strike 1-3 & reset, handler strike 1-3 & reset, serta penolakan inbound gate).
+5. `dashboard/tests/unit/customer-handle.test.ts` · Penyesuaian ekspektasi fallback anti-bisu terhadap template kesempatan 1/3.
+6. `scripts/test-e2e-incoming.ts` · Penambahan langkah pengujian simulasi deterministik end-to-end (9 langkah, 100% Lulus).
+
+### 3. Commit Git
+- Commit format: `feat: implementasi aturan 3-strike fallback dan auto-handover minri pada pilihan pelanggan`
+
+### 4. Migrasi dan Rollback
+- Migrasi: Tidak ada perubahan skema database (memanfaatkan kolom `metadata.retry_count` yang sudah ada).
+- Rollback: `git revert HEAD` jika ingin mengembalikan perubahan.
+
+### 5. Bukti Verifikasi
+1. **Pengujian Unit Baru (`pipeline-retry-limit.test.ts`):** `npx vitest run tests/unit/pipeline-retry-limit.test.ts` · 8/8 tests passed (100% Lulus).
+2. **Unit Test Suite Lengkap:** `npm test -- --run` · 51 test files, 462 test cases passed (100% Lulus, exit code 0).
+3. **Integration Test Suite:** `npm run test:integration` · 8 passed (100% Lulus, exit code 0).
+4. **TypeScript Typecheck & ESLint:** `npx tsc --noEmit && npm run lint` · 0 error, 0 warning.
+5. **Skrip Simulasi E2E Terpadu (`scripts/test-e2e-incoming.ts`):** 9/9 langkah PASS (100% Lulus).
+6. **Smoke Test:** `./scripts/smoke.sh` · 14/14 pemeriksaan lulus (exit code 0).
+7. **Audit Antislop R-02:** 0 karakter em dash pada seluruh berkas baru dan modifikasi.
+
+### 6. Known Issues / Catatan Operasional
+- Pelanggan yang salah memilih 3x berturut-turut akan langsung dijeda untuk penanganan manual oleh Minri. Jika pelanggan kemudian mengirim format pesanan lengkap, rute inbound otomatis membuka kembali jalur pemesanan.
 

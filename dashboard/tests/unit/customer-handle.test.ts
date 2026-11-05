@@ -614,7 +614,7 @@ describe("POST /api/internal/customer/handle", () => {
     expect(data.ok).toBe(true);
     expect(data.state_after).toBe("AWAITING_CHOICE");
     expect(data.replies.length).toBeGreaterThanOrEqual(1);
-    expect(data.replies[0].text).toContain("belum menangkap pilihannya");
+    expect(data.replies[0].text).toContain("Kesempatan 1/3");
   });
 
   it("Case 12: Chained sub-menu navigates to sub-router, sets current_router_id, and executes next choice", async () => {

@@ -584,75 +584,128 @@ export async function POST(request: Request) {
           });
         }
 
-        // 4. Input Tidak Dikenal (Fallback Otomatis & Port Fallback)
-        const fallbackEdge = graph.edges.find(
-          (e) =>
-            e.source === routerId &&
-            (e.sourceHandle === "branch_fallback" ||
-             e.sourceHandle === "fallback" ||
-             e.sourceHandle?.toLowerCase().includes("fallback"))
-        );
+        // 4. Input Tidak Dikenal (Aturan 3-Strike Rule & Fallback Otomatis)
+        const currentRetry = typeof meta.retry_count === "number" ? meta.retry_count : 0;
+        const currentRetries = currentRetry + 1;
 
-        let fallbackReplyText = "";
-        let nextRouterIdAfterFallback: string | null = routerNode?.id || activeRouterId || null;
+        if (currentRetries < 3) {
+          // Kesalahan ke-1 dan ke-2
+          const fallbackEdge = graph.edges.find(
+            (e) =>
+              e.source === routerId &&
+              (e.sourceHandle === "branch_fallback" ||
+               e.sourceHandle === "fallback" ||
+               e.sourceHandle?.toLowerCase().includes("fallback"))
+          );
 
-        if (fallbackEdge) {
-          const fallbackTargetNode = graph.nodes.find((n) => n.id === fallbackEdge.target);
-          if (fallbackTargetNode) {
-            const rawMsg = extractNodeMessageText(fallbackTargetNode);
-            if (rawMsg) {
-              fallbackReplyText = renderPipelineTemplate(rawMsg, {
-                customer_name: session.customer_name || "Pelanggan",
-                customer_phone: session.phone_e164,
-                last_message: message_text,
-              });
-            }
-            const downstreamRouter = findDownstreamRouter(fallbackTargetNode.id, graph);
-            if (downstreamRouter) {
-              nextRouterIdAfterFallback = downstreamRouter.id;
+          let nextRouterIdAfterFallback: string | null = routerNode?.id || activeRouterId || null;
+
+          if (fallbackEdge) {
+            const fallbackTargetNode = graph.nodes.find((n) => n.id === fallbackEdge.target);
+            if (fallbackTargetNode) {
+              const downstreamRouter = findDownstreamRouter(fallbackTargetNode.id, graph);
+              if (downstreamRouter) {
+                nextRouterIdAfterFallback = downstreamRouter.id;
+              }
             }
           }
-        }
-
-        if (!fallbackReplyText) {
           const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
-          fallbackReplyText =
+          const baseFallback =
             routerFallbackText ||
             "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai menu ya Kak.";
+          const fallbackReplyText = `${baseFallback} (Kesempatan ${currentRetries}/3)`;
+          replies.push({
+            to: session.phone_e164,
+            phone_e164: session.phone_e164,
+            chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
+            body: fallbackReplyText,
+            text: fallbackReplyText,
+            trigger_type: "CUSTOMER_REPLY",
+          });
+
+          const updatedMetadata: Prisma.InputJsonValue = {
+            ...meta,
+            current_router_id: nextRouterIdAfterFallback,
+            retry_count: currentRetries,
+            last_message_id: message_id || (meta.last_message_id as string | null) || null,
+          };
+
+          await prisma.customerSession.updateMany({
+            where: { id: session.id, state: stateBefore },
+            data: {
+              state: "AWAITING_CHOICE",
+              last_message_at: new Date(),
+              metadata: updatedMetadata,
+            },
+          });
+
+          return NextResponse.json({
+            ok: true,
+            state_before: stateBefore,
+            state_after: "AWAITING_CHOICE",
+            replies,
+          });
+        } else {
+          // Kesalahan ke-3: Aturan 3-Strike Rule & Auto-Handover ke Minri
+          const transitionText =
+            "Mohon maaf Kak, tampaknya pilihan belum sesuai 🙏\nAgar lebih mudah, chat Kakak kami teruskan langsung ke Minri (Admin Berseri) ya. Bot kami jeda sejenak, mohon ditunggu sebentar ya Kak! ☕🌸";
+
+          replies.push({
+            to: session.phone_e164,
+            phone_e164: session.phone_e164,
+            chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
+            body: transitionText,
+            text: transitionText,
+            trigger_type: "CUSTOMER_REPLY",
+          });
+
+          const now = new Date();
+          try {
+            const primaryOwner = await getPrimaryOwner();
+            if (primaryOwner) {
+              const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
+              const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
+              const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+              const alertText = `🔔 *Pemberitahuan: Bantuan Pelanggan* 🌸\n\nAda pelanggan yang salah memasukkan pilihan menu sebanyak 3x:\n• Nomor: ${session.phone_e164}\n• Pesan Terakhir: "${sanitized}"\n\nBot telah otomatis dijeda untuk nomor ini agar Minri bisa membantu secara langsung di WhatsApp.`;
+
+              replies.push({
+                to: ownerPhone,
+                phone_e164: primaryOwner.phone_e164 || ownerPhone,
+                chat_id: ownerChatId,
+                body: alertText,
+                text: alertText,
+                trigger_type: "OWNER_DIGEST",
+              });
+            }
+          } catch (ownerAlertErr) {
+            console.error("Failed to prepare 3-strike owner alert, continuing with customer reply:", ownerAlertErr);
+          }
+
+          const updatedMetadata: Prisma.InputJsonValue = {
+            ...meta,
+            current_router_id: null,
+            retry_count: 0,
+            waiting_since: now.toISOString(),
+            last_message_id: message_id || (meta.last_message_id as string | null) || null,
+          };
+
+          await prisma.customerSession.updateMany({
+            where: { id: session.id, state: stateBefore },
+            data: {
+              state: "PAUSED_FOR_OWNER",
+              paused_at: now,
+              last_message_at: now,
+              metadata: updatedMetadata,
+            },
+          });
+
+          return NextResponse.json({
+            ok: true,
+            state_before: stateBefore,
+            state_after: "PAUSED_FOR_OWNER",
+            replies,
+          });
         }
-
-        replies.push({
-          to: session.phone_e164,
-          phone_e164: session.phone_e164,
-          chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
-          body: fallbackReplyText,
-          text: fallbackReplyText,
-          trigger_type: "CUSTOMER_REPLY",
-        });
-
-        const currentRetry = typeof meta.retry_count === "number" ? meta.retry_count : 0;
-        const updatedMetadata: Prisma.InputJsonValue = {
-          ...meta,
-          current_router_id: nextRouterIdAfterFallback,
-          retry_count: currentRetry + 1,
-          last_message_id: message_id || (meta.last_message_id as string | null) || null,
-        };
-
-        await prisma.customerSession.updateMany({
-          where: { id: session.id, state: stateBefore },
-          data: {
-            state: "AWAITING_CHOICE",
-            last_message_at: new Date(),
-            metadata: updatedMetadata,
-          },
-        });
-
-        return NextResponse.json({
-          ok: true,
-          state_before: stateBefore,
-          state_after: "AWAITING_CHOICE",
-          replies,
-        });
       } catch (choiceError) {
         console.error("[CUSTOMER_HANDLE_CHOICE_ERROR] Gagal mengevaluasi alur pilihan:", choiceError);
         const fallbackText = "Mohon maaf Kak, terjadi kendala saat memproses menu 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 ya Kak.";
@@ -1102,25 +1155,55 @@ export async function POST(request: Request) {
       replies.length === 0 &&
       (stateBefore === "AWAITING_CHOICE" || stateAfter === "AWAITING_CHOICE")
     ) {
-      const routerNode = pipeline.config.graph?.nodes?.find(
-        (n) => n.id === "node-router" || n.type === "CONDITION_ROUTER"
-      );
-      const routerData = (routerNode?.data as Record<string, unknown>) || {};
-      const fallbackText =
-        (routerData.fallback_reply_text as string)?.trim() ||
-        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai pilihan menu ya Kak.";
+      const currentRetries = (typeof meta.retry_count === "number" ? meta.retry_count : 0) + 1;
+      if (currentRetries < 3) {
+        const fallbackText = `Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai menu ya Kak. (Kesempatan ${currentRetries}/3)`;
+        replies.push({
+          to: customer_phone,
+          phone_e164: customer_phone,
+          chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
+          text: fallbackText,
+          body: fallbackText,
+          trigger_type: "CUSTOMER_REPLY",
+        });
+        stateAfter = "AWAITING_CHOICE";
+        nextRetryCount = currentRetries;
+      } else {
+        const transitionText =
+          "Mohon maaf Kak, tampaknya pilihan belum sesuai 🙏\nAgar lebih mudah, chat Kakak kami teruskan langsung ke Minri (Admin Berseri) ya. Bot kami jeda sejenak, mohon ditunggu sebentar ya Kak! ☕🌸";
+        replies.push({
+          to: customer_phone,
+          phone_e164: customer_phone,
+          chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
+          body: transitionText,
+          text: transitionText,
+          trigger_type: "CUSTOMER_REPLY",
+        });
+        stateAfter = "PAUSED_FOR_OWNER";
+        nextPausedAt = new Date();
+        nextRetryCount = 0;
+        try {
+          const primaryOwner = await getPrimaryOwner();
+          if (primaryOwner) {
+            const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
+            const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
+            const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+            const alertText = `🔔 *Pemberitahuan: Bantuan Pelanggan* 🌸\n\nAda pelanggan yang salah memasukkan pilihan menu sebanyak 3x:\n• Nomor: ${customer_phone}\n• Pesan Terakhir: "${sanitized}"\n\nBot telah otomatis dijeda untuk nomor ini agar Minri bisa membantu secara langsung di WhatsApp.`;
 
-      replies.push({
-        to: customer_phone,
-        phone_e164: customer_phone,
-        chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
-        text: fallbackText,
-        body: fallbackText,
-        trigger_type: "CUSTOMER_REPLY",
-      });
-      stateAfter = "AWAITING_CHOICE";
+            replies.push({
+              to: ownerPhone,
+              phone_e164: primaryOwner.phone_e164 || ownerPhone,
+              chat_id: ownerChatId,
+              body: alertText,
+              text: alertText,
+              trigger_type: "OWNER_DIGEST",
+            });
+          }
+        } catch (ownerAlertErr) {
+          console.error("Failed to prepare 3-strike owner alert in defensive fallback:", ownerAlertErr);
+        }
+      }
     }
-
     // 6. Optimistic Concurrency Update untuk state selain order lengkap
     const updatedMetadata: Prisma.InputJsonValue = {
       ...meta,

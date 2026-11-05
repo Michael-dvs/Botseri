@@ -275,7 +275,7 @@ async function main() {
     senderId: SIM_CHAT_ID,
     text: "4",
     expectedStateAfter: "AWAITING_CHOICE",
-    expectedReplySnippet: "belum menangkap",
+    expectedReplySnippet: "Kesempatan 1/3",
   };
   // Sapaan dulu
   await runStep({
@@ -295,6 +295,75 @@ async function main() {
     state: resFallback.actualState,
     status: resFallback.pass ? "PASS" : "FAIL",
     catatan: resFallback.reason || "Lulus sesuai ekspektasi",
+  });
+
+  // Kesalahan ke-2: Input '9'
+  const stepFallback2: StepExpectation = {
+    name: "7. Input '9' (Kesalahan 2/3)",
+    senderId: SIM_CHAT_ID,
+    text: "9",
+    expectedStateAfter: "AWAITING_CHOICE",
+    expectedReplySnippet: "Kesempatan 2/3",
+  };
+  const resFallback2 = await runStep(stepFallback2, 101);
+  if (!resFallback2.pass) allPassed = false;
+  resultsTable.push({
+    langkah: stepFallback2.name,
+    input: stepFallback2.text,
+    pengirim: "@c.us",
+    state: resFallback2.actualState,
+    status: resFallback2.pass ? "PASS" : "FAIL",
+    catatan: resFallback2.reason || "Lulus sesuai ekspektasi",
+  });
+
+  // Kesalahan ke-3: Input '7' (Auto-Handover Minri & PAUSED_FOR_OWNER)
+  const stepFallback3: StepExpectation = {
+    name: "8. Input '7' (Auto-Handover)",
+    senderId: SIM_CHAT_ID,
+    text: "7",
+    expectedStateAfter: "PAUSED_FOR_OWNER",
+    expectedReplySnippet: "kami teruskan langsung ke Minri",
+  };
+  const resFallback3 = await runStep(stepFallback3, 102);
+  if (!resFallback3.pass) allPassed = false;
+  resultsTable.push({
+    langkah: stepFallback3.name,
+    input: stepFallback3.text,
+    pengirim: "@c.us",
+    state: resFallback3.actualState,
+    status: resFallback3.pass ? "PASS" : "FAIL",
+    catatan: resFallback3.reason || "Lulus sesuai ekspektasi",
+  });
+
+  // Skenario 4: Pesan Lanjutan Saat Status PAUSED_FOR_OWNER (Wajib Ditolak Inbound Gate)
+  const spamMsgId = `sim-spam-${Date.now()}`;
+  const spamRes = await fetch(`${DASHBOARD_URL}/api/internal/inbound/accept`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${INTERNAL_TOKEN}`,
+    },
+    body: JSON.stringify({
+      wa_message_id: spamMsgId,
+      chat_id: SIM_CHAT_ID,
+      from: SIM_CHAT_ID,
+      from_me: false,
+      body: "halo p p p bot",
+      received_at: new Date().toISOString(),
+    }),
+  });
+  const spamData = await spamRes.json();
+  const spamPass = spamData.accept === false && spamData.reason === "SESSION_PAUSED_FOR_MANUAL_OWNER";
+  if (!spamPass) allPassed = false;
+  resultsTable.push({
+    langkah: "9. Inbound Saat Paused",
+    input: "spam",
+    pengirim: "@c.us",
+    state: "PAUSED_FOR_OWNER",
+    status: spamPass ? "PASS" : "FAIL",
+    catatan: spamPass
+      ? "Ditolak otomatis (SESSION_PAUSED_FOR_MANUAL_OWNER)"
+      : `Gagal ditolak: accept=${spamData.accept}, reason=${spamData.reason}`,
   });
 
   // Tampilkan tabel hasil

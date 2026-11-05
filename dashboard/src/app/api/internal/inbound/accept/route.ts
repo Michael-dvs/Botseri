@@ -668,6 +668,39 @@ export async function POST(request: Request) {
       targetChatId,
     );
   }
+  // 7b. Penolakan Inbound Saat Sesi Dijeda untuk Owner (Handover Manual / 3-Strike Rule)
+  if (customerSession && customerSession.state === "PAUSED_FOR_OWNER" && customerSession.paused_at) {
+    const pauseTtlHours = Number(process.env.CUSTOMER_PAUSE_TTL_HOURS) || 24;
+    const isPausedExpired =
+      Date.now() - new Date(customerSession.paused_at).getTime() > pauseTtlHours * 3600 * 1000;
+
+    // Jika belum kedaluwarsa dan BUKAN format pesanan: tolak pesan inbound agar bot tidak mengirim balasan spam (Cegah 429)
+    if (!isPausedExpired && !looksLikeOrderForm(input.body ?? "")) {
+      const sessionMeta = (customerSession.metadata as Record<string, unknown>) || {};
+      const currentWaitingSince = sessionMeta.waiting_since || new Date().toISOString();
+      const currentUnreadCount = (typeof sessionMeta.unread_count === "number" ? sessionMeta.unread_count : 0) + 1;
+
+      await prisma.customerSession.update({
+        where: { id: customerSession.id },
+        data: {
+          metadata: {
+            ...sessionMeta,
+            waiting_since: currentWaitingSince,
+            unread_count: currentUnreadCount,
+            last_unread_message: (input.body || "").slice(0, 150),
+          },
+        },
+      });
+
+      return response(
+        false,
+        "SESSION_PAUSED_FOR_MANUAL_OWNER",
+        null,
+        targetChatId,
+      );
+    }
+  }
+
 
   // Auto-Heal: Jika activeOrder TIDAK ADA dan sesi sedang ter-pause oleh order lama, pulihkan sesi
   if (!activeOrder && customerSession && customerSession.state === "PAUSED_FOR_OWNER" && !customerSession.paused_at) {
