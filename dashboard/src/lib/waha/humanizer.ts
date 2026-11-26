@@ -28,6 +28,7 @@ export type HumanizeOptions = {
   replyToWaMessageId?: string;
   isPairing?: boolean;
   skipDelay?: boolean;
+  bypassRateCheck?: boolean;
   trigger?: Trigger;
   enqueuedAt?: number;
 };
@@ -48,6 +49,31 @@ let isProcessing = false;
 // Rate-limiting state
 let lastSentAt = 0;
 const sentTimestamps: number[] = [];
+const MAX_PER_MINUTE = 8;
+const MAX_PER_HOUR = 60;
+
+export function calculateWindowWaitMs(trigger?: Trigger): number {
+  const priority = trigger ? (TRIGGER_PRIORITY[trigger] ?? 2) : 2;
+  const maxMinute = MAX_PER_MINUTE - (priority === 0 ? 0 : 1);
+  const maxHour = MAX_PER_HOUR - (priority === 0 ? 0 : 5);
+  const now = Date.now();
+  let minuteCount = 0;
+  let hourCount = 0;
+  for (const timestamp of sentTimestamps) {
+    if (timestamp >= now - 60_000) minuteCount++;
+    if (timestamp >= now - 3_600_000) hourCount++;
+  }
+  let waitMs = 0;
+  for (const timestamp of sentTimestamps) {
+    if (timestamp >= now - 60_000 && --minuteCount === maxMinute - 1) {
+      waitMs = Math.max(waitMs, timestamp + 60_000 - now + 1);
+    }
+    if (timestamp >= now - 3_600_000 && --hourCount === maxHour - 1) {
+      waitMs = Math.max(waitMs, timestamp + 3_600_000 - now + 1);
+    }
+  }
+  return waitMs;
+}
 
 // Circuit breaker state
 let consecutiveFailures = 0;
@@ -168,18 +194,38 @@ async function checkRateLimits(
   while (sentTimestamps.length > 0 && sentTimestamps[0] < window60m) {
     sentTimestamps.shift();
   }
+  // Limit each customer chat to 40 outbound messages per hour.
+  if (priority === 2 && typeof prisma.messageLog?.count === "function") {
+    const customerOutboundCount = await prisma.messageLog.count({
+      where: {
+        direction: "OUTBOUND",
+        chat_id: chatId,
+        created_at: { gte: new Date(Date.now() - 3600_000) },
+      },
+    });
+    if (customerOutboundCount >= 40) {
+      await recordEvent("WARN", "waha.antiban", "CUSTOMER_HOURLY_LIMIT_BLOCKED", {
+        chat_id: maskChatId(chatId),
+        count: customerOutboundCount,
+      });
+      throw new HumanizerError(
+        "CUSTOMER_HOURLY_LIMIT_BLOCKED",
+        429,
+        "Batas pengiriman pesan ke pelanggan tercapai (40 pesan per jam)",
+      );
+    }
+  }
 
   let count60s = sentTimestamps.filter((ts) => ts >= window60s).length;
   let count60m = sentTimestamps.length;
 
   // Reservasi Kuota:
-  // Batas 4/menit: P0 boleh pakai slot ke-4, P1/P2 maksimal 3 slot/menit (1 slot direservasi untuk P0)
-  // Batas 25/jam: P0 boleh pakai hingga 25, P1/P2 maksimal 20/jam (5 slot direservasi untuk P0)
-  const maxMinute = priority === 0 ? 4 : 3;
-  const maxHour = priority === 0 ? 25 : 20;
+  // Reserve one minute slot and five hourly slots for P0.
+  const maxMinute = MAX_PER_MINUTE - (priority === 0 ? 0 : 1);
+  const maxHour = MAX_PER_HOUR - (priority === 0 ? 0 : 5);
 
   // Jika kuota jendela 60s sedang penuh, tahan eksekusi secara asinkron hingga slot jendela waktu tersedia
-  if (count60s >= maxMinute && !isFastTest() && !opts?.skipDelay) {
+  if (!opts?.bypassRateCheck && count60s >= maxMinute && !isFastTest() && !opts?.skipDelay) {
     const oldestIn60s = sentTimestamps.filter((ts) => ts >= window60s)[0];
     const waitMs = oldestIn60s ? Math.max(500, oldestIn60s + 60_000 - Date.now() + 250) : 1500;
     if (waitMs > 0 && waitMs <= 30_000) {
@@ -190,7 +236,7 @@ async function checkRateLimits(
       count60m = sentTimestamps.length;
     }
   }
-  if (count60s >= maxMinute || count60m >= maxHour) {
+  if (!opts?.bypassRateCheck && (count60s >= maxMinute || count60m >= maxHour)) {
     await recordEvent(
       "WARN",
       "waha.antiban",
@@ -207,31 +253,10 @@ async function checkRateLimits(
     throw new HumanizerError(
       "WAHA_RATE_LIMIT_BLOCKED",
       429,
-      `Batas pengiriman pesan tercapai (${count60s}/4 per menit, ${count60m}/25 per jam)`,
+      `Batas pengiriman pesan tercapai (${count60s}/${maxMinute} per menit, ${count60m}/${maxHour} per jam)`,
     );
   }
 
-  // Batas per pelanggan: maksimal 12 pesan per jam per chat_id pelanggan
-  if (priority === 2 && typeof prisma.messageLog?.count === "function") {
-    const customerOutboundCount = await prisma.messageLog.count({
-      where: {
-        direction: "OUTBOUND",
-        chat_id: chatId,
-        created_at: { gte: new Date(Date.now() - 3600_000) },
-      },
-    });
-    if (customerOutboundCount >= 12) {
-      await recordEvent("WARN", "waha.antiban", "CUSTOMER_HOURLY_LIMIT_BLOCKED", {
-        chat_id: maskChatId(chatId),
-        count: customerOutboundCount,
-      });
-      throw new HumanizerError(
-        "CUSTOMER_HOURLY_LIMIT_BLOCKED",
-        429,
-        "Batas pengiriman pesan ke pelanggan tercapai (12 pesan per jam)",
-      );
-    }
-  }
 }
 
 function checkCircuitBreaker(): void {
@@ -346,6 +371,7 @@ export async function initWahaGuardFromPersistence(): Promise<void> {
         created_at: { gte: oneHourAgo },
       },
       select: { created_at: true },
+      orderBy: { created_at: "asc" },
     });
     for (const m of recentOutbound) {
       sentTimestamps.push(new Date(m.created_at).getTime());

@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   sendHumanizedMessage,
   __resetHumanizerState,
+  calculateWindowWaitMs,
   getWahaCircuitBreakerStatus,
   initWahaGuardFromPersistence,
 } from "@/lib/waha/humanizer";
 import { POST as resetGuardPOST } from "@/app/api/waha/guard/reset/route";
 import { POST as customerHandlePOST } from "@/app/api/internal/customer/handle/route";
+import { POST as wahaSendPOST } from "@/app/api/internal/waha/send/route";
 
 const {
   prismaMock,
@@ -85,6 +87,8 @@ describe("S09: WAHA Priority Queue, Rate Limit Reservation, Breaker Persistence,
     vi.clearAllMocks();
     __resetHumanizerState();
     recordEventMock.mockResolvedValue({});
+    prismaMock.messageLog.count.mockResolvedValue(0);
+    prismaMock.messageLog.create.mockResolvedValue({ id: "outbound-log" });
     authMock.mockReturnValue(true);
     getSessionMock.mockResolvedValue({ sub: "user-1", username: "admin" });
 
@@ -157,13 +161,11 @@ describe("S09: WAHA Priority Queue, Rate Limit Reservation, Breaker Persistence,
   });
 
   describe("2. Uji Reservasi Kuota P0", () => {
-    it("Kuota slot ke-4 per menit hanya diizinkan untuk P0 dan menahan P2", async () => {
-      // Simulasikan 3 pesan sudah terkirim dalam 60 detik terakhir
+    it("reserves the eighth minute slot for P0 and blocks P2", async () => {
       const now = Date.now();
-      const pastTimestamps = [now - 30_000, now - 20_000, now - 10_000];
+      const pastTimestamps = Array.from({ length: 7 }, (_, index) => now - 35_000 + index * 4_000);
       __resetHumanizerState({ sentTimestamps: pastTimestamps });
 
-      // Pesan P2 berikutnya (ke-4 dalam menit ini) harus ditolak/dibatasi karena slot ke-4 direservasi untuk P0
       await expect(
         sendHumanizedMessage({
           chatId: "628987654321@c.us",
@@ -171,9 +173,8 @@ describe("S09: WAHA Priority Queue, Rate Limit Reservation, Breaker Persistence,
           trigger: "CUSTOMER_REPLY",
           skipDelay: true,
         })
-      ).rejects.toThrow(/Batas pengiriman pesan tercapai|WAHA_RATE_LIMIT_BLOCKED/);
+      ).rejects.toMatchObject({ code: "WAHA_RATE_LIMIT_BLOCKED", status: 429 });
 
-      // Namun pesan P0 tetap diizinkan terkirim pada slot ke-4
       const p0Res = await sendHumanizedMessage({
         chatId: "628123456789@c.us",
         text: "P0-Allowed",
@@ -181,6 +182,112 @@ describe("S09: WAHA Priority Queue, Rate Limit Reservation, Breaker Persistence,
         skipDelay: true,
       });
       expect(p0Res.ok).toBe(true);
+    });
+
+    it.each([
+      { count: 39, allowed: true },
+      { count: 40, allowed: false },
+    ])("enforces the per-customer hourly boundary at $count prior messages", async ({ count, allowed }) => {
+      prismaMock.authorizedNumber.findUnique.mockResolvedValue(null);
+      prismaMock.authorizedNumber.findFirst.mockResolvedValue(null);
+      prismaMock.messageLog.count.mockResolvedValue(count);
+      const sending = sendHumanizedMessage({
+        chatId: "628987654321@c.us", text: "Balasan pelanggan", trigger: "CUSTOMER_REPLY", skipDelay: true,
+        bypassRateCheck: true,
+      });
+      if (allowed) {
+        await expect(sending).resolves.toMatchObject({ ok: true });
+        expect(sendTextDirectMock).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(sending).rejects.toMatchObject({ code: "CUSTOMER_HOURLY_LIMIT_BLOCKED", status: 429 });
+        expect(sendTextDirectMock).not.toHaveBeenCalled();
+      }
+    });
+
+    it("allows the sixtieth P0 message in an hour and blocks the next", async () => {
+      __resetHumanizerState({ sentTimestamps: Array(59).fill(Date.now() - 120_000) });
+      const options = { chatId: "628123456789@c.us", text: "Alarm owner", trigger: "TASK_ALARM" as const, skipDelay: true };
+      await expect(sendHumanizedMessage(options)).resolves.toMatchObject({ ok: true });
+      await expect(sendHumanizedMessage(options)).rejects.toMatchObject({ code: "WAHA_RATE_LIMIT_BLOCKED", status: 429 });
+      expect(sendTextDirectMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { offsets: [], trigger: "CUSTOMER_REPLY" as const, expected: 0 },
+      { offsets: Array(7).fill(-59_000), trigger: "CUSTOMER_REPLY" as const, expected: 1001 },
+      { offsets: Array(7).fill(-59_000), trigger: "TASK_ALARM" as const, expected: 0 },
+      { offsets: [-59_000, ...Array(8).fill(-50_000)], trigger: "TASK_ALARM" as const, expected: 10_001 },
+      { offsets: Array(55).fill(-3_500_000), trigger: "CUSTOMER_REPLY" as const, expected: 100_001 },
+      { offsets: Array(55).fill(-3_500_000), trigger: "TASK_ALARM" as const, expected: 0 },
+      { offsets: Array(60).fill(-3_500_000), trigger: "TASK_ALARM" as const, expected: 100_001 },
+      { offsets: [...Array(55).fill(-3_500_000), ...Array(7).fill(-1000)], trigger: "CUSTOMER_REPLY" as const, expected: 100_001 },
+      { offsets: [-3_600_001], trigger: "CUSTOMER_REPLY" as const, expected: 0 },
+    ])("calculates the next free window for $trigger: $expected ms", ({ offsets, trigger, expected }) => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-11-06T10:00:00Z"));
+        __resetHumanizerState({ sentTimestamps: offsets.map((offset) => Date.now() + offset) });
+        expect(calculateWindowWaitMs(trigger)).toBe(expected);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      { ageMs: 1000, waitMs: 59_001 },
+      { ageMs: 59_000, waitMs: 5000 },
+    ])("delivers a 202 background reply after $waitMs ms despite renewed saturation", async ({ ageMs, waitMs }) => {
+      vi.useFakeTimers();
+      try {
+        __resetHumanizerState({ sentTimestamps: Array(7).fill(Date.now() - ageMs) });
+        const response = await wahaSendPOST(new Request("http://localhost/api/internal/waha/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-botseri-fast-test": "1" },
+          body: JSON.stringify({
+            chat_id: "628987654321@c.us", body: "Formulir pesanan dari antrean",
+            trigger_type: "CUSTOMER_REPLY", idempotency_key: "delayed-form", bypassRateCheck: true,
+          }),
+        }));
+        expect(response.status).toBe(202);
+        expect(await response.json()).toMatchObject({ ok: true, queued: true });
+        await vi.advanceTimersByTimeAsync(waitMs - 1);
+        expect(sendTextDirectMock).not.toHaveBeenCalled();
+        __resetHumanizerState({ sentTimestamps: Array(7).fill(Date.now()) });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(sendTextDirectMock).toHaveBeenCalledTimes(1);
+        expect(sendTextDirectMock).toHaveBeenCalledWith(
+          "628987654321@c.us", "Formulir pesanan dari antrean", undefined,
+        );
+        expect(prismaMock.messageLog.create).toHaveBeenCalledWith({
+          data: {
+            direction: "OUTBOUND", chat_id: "628987654321@c.us",
+            body: "Formulir pesanan dari antrean", in_reply_to: "scheduler:delayed-form",
+          },
+        });
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it("returns the customer hourly error instead of accepting an unsendable background reply", async () => {
+      vi.useFakeTimers();
+      try {
+        __resetHumanizerState({ sentTimestamps: Array(7).fill(Date.now()) });
+        prismaMock.messageLog.count.mockResolvedValue(40);
+        const response = await wahaSendPOST(new Request("http://localhost/api/internal/waha/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-botseri-fast-test": "1" },
+          body: JSON.stringify({ chat_id: "628987654321@c.us", body: "Pesan dibatasi", trigger_type: "CUSTOMER_REPLY" }),
+        }));
+        expect(response.status).toBe(429);
+        expect(await response.json()).toMatchObject({ code: "CUSTOMER_HOURLY_LIMIT_BLOCKED" });
+        expect(vi.getTimerCount()).toBe(0);
+        expect(sendTextDirectMock).not.toHaveBeenCalled();
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
     });
   });
 

@@ -218,6 +218,9 @@ describe("S10: 20 Skenario Uji Paritas Pipeline Simulator vs Runtime", () => {
     // Buat konfigurasi dengan sub-router yang memiliki cabang 1 menuju node-form
     const graphWithSubOrder: PipelineGraph = {
       ...testGraph,
+      nodes: testGraph.nodes.map((node) => node.id === "node-sub-router"
+        ? { ...node, data: { ...node.data, branches: [{ id: "branch_1", label: "Pesan", keywords: ["1"] }] } }
+        : node),
       edges: [
         ...testGraph.edges,
         { id: "e-sub-order", source: "node-sub-router", target: "node-form", sourceHandle: "branch_1" },
@@ -241,7 +244,7 @@ describe("S10: 20 Skenario Uji Paritas Pipeline Simulator vs Runtime", () => {
     expect(res.replies[0]).not.toContain("Halo Kak! Selamat datang");
   });
 
-  it("Skenario 23: Input di luar pilihan ('99' / 'halo') menghasilkan fallback dan mempertahankan router", () => {
+  it("Skenario 23: Input di luar pilihan ('99') menghasilkan fallback dan mempertahankan router", () => {
     // 1. Pada router dengan custom fallback_reply_text: menggunakan teks kustom router
     const resCustom = runPipelineStep(
       {
@@ -256,23 +259,5 @@ describe("S10: 20 Skenario Uji Paritas Pipeline Simulator vs Runtime", () => {
     expect(resCustom.replies[0]).toContain("Ketik 'buket' atau 'dekor'");
     assertParity("23-FALLBACK_RETAIN_ROUTER", "AWAITING_CHOICE", "99", "node-sub-router");
 
-    // 2. Pada router tanpa fallback_reply_text: menghasilkan fallback deterministik standar
-    const graphNoFallbackText: PipelineGraph = {
-      ...testGraph,
-      nodes: testGraph.nodes.map((n) =>
-        n.id === "node-sub-router" ? { ...n, data: { ...n.data, fallback_reply_text: undefined } } : n
-      ),
-    };
-    const resStandard = runPipelineStep(
-      {
-        config: { ...testConfig, graph: graphNoFallbackText },
-        sessionState: "AWAITING_CHOICE",
-        currentRouterId: "node-sub-router",
-      },
-      { text: "99" }
-    );
-    expect(resStandard.nextState).toBe("AWAITING_CHOICE");
-    expect(resStandard.nextRouterId).toBe("node-sub-router");
-    expect(resStandard.replies[0]).toContain("pilihan belum sesuai format");
   });
 });

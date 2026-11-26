@@ -5,7 +5,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { authorizeInternal } from "@/lib/internal/auth";
 import { log } from "@/lib/logger";
-import { HumanizerError, sendHumanizedMessage } from "@/lib/waha/humanizer";
+import { calculateWindowWaitMs, HumanizerError, sendHumanizedMessage } from "@/lib/waha/humanizer";
 import { validateAgentOutput, FALLBACK_INVALID_REPLY } from "@/lib/waha/guard";
 import { OUTBOUND_TRIGGERS, type Trigger } from "@/lib/waha/triggers";
 const schema = z
@@ -169,43 +169,53 @@ export async function POST(request: Request) {
   // 2. Kirim pesan melalui humanizer queue & rate-limiter
   let sendResult: { ok: boolean; response: unknown };
   const skipDelay = request.headers.get("x-botseri-fast-test") === "1";
+  const sendOptions = {
+    chatId: targetChatId,
+    text: textToSend,
+    replyToWaMessageId: input.reply_to_wa_message_id,
+    isPairing: input.trigger_type === "PAIRING" || input.trigger_type === "NEW_ORDER_ALERT",
+    trigger: input.trigger_type as Trigger,
+    skipDelay,
+  };
+  const outboundLogData = {
+    direction: "OUTBOUND" as const,
+    chat_id: targetChatId,
+    body: textToSend,
+    in_reply_to: idempotencyTag ?? input.reply_to_wa_message_id ?? input.reply_to_message_id ?? null,
+  };
   try {
-    sendResult = await sendHumanizedMessage({
-      chatId: targetChatId,
-      text: textToSend,
-      replyToWaMessageId: input.reply_to_wa_message_id,
-      isPairing: input.trigger_type === "PAIRING" || input.trigger_type === "NEW_ORDER_ALERT",
-      trigger: input.trigger_type as Trigger,
-      skipDelay,
-    });
+    sendResult = await sendHumanizedMessage(sendOptions);
   } catch (error) {
     if (error instanceof HumanizerError) {
       if (
         error.status === 429 &&
+        error.code === "WAHA_RATE_LIMIT_BLOCKED" &&
         (input.trigger_type === "CUSTOMER_REPLY" ||
           input.trigger_type === "CUSTOM_REPLY" ||
           input.trigger_type === "OWNER_DIGEST" ||
           input.trigger_type === "TASK_ALARM" ||
           input.trigger_type === "NEW_ORDER_ALERT")
       ) {
+        const waitTimeMs = Math.max(calculateWindowWaitMs(input.trigger_type as Trigger), 5000);
         log("WARN", "waha.send", "rate limit reached for bot reply, queueing in background with 202 Accepted", {
           targetChatId,
           trigger_type: input.trigger_type,
+          wait_ms: waitTimeMs,
         });
 
-        void (async () => {
+        setTimeout(async () => {
           try {
-            await new Promise((resolve) => setTimeout(resolve, 4000));
-            await sendHumanizedMessage({
-              chatId: targetChatId,
-              text: textToSend,
-              replyToWaMessageId: input.reply_to_wa_message_id,
-              trigger: input.trigger_type as Trigger,
-            });
+            const result = await sendHumanizedMessage({ ...sendOptions, bypassRateCheck: true });
+            if (!result.ok) {
+              log("WARN", "waha.send", "background delayed send skipped", { targetChatId });
+              return;
+            }
+            await prisma.messageLog.create({ data: outboundLogData });
+            log("INFO", "waha.send", "background delayed send succeeded", { targetChatId });
           } catch (bgErr) {
             log("ERROR", "waha.send", "background delayed send failed", { targetChatId }, bgErr);
           }
-        })();
+        }, waitTimeMs);
 
         return NextResponse.json(
           {
@@ -232,18 +242,7 @@ export async function POST(request: Request) {
   }
 
   // 3. Catat ke tabel message_log
-  const inReplyTo = idempotencyTag
-    ?? input.reply_to_wa_message_id
-    ?? input.reply_to_message_id
-    ?? null;
-  const createdLog = await prisma.messageLog.create({
-    data: {
-      direction: "OUTBOUND",
-      chat_id: targetChatId,
-      body: textToSend,
-      in_reply_to: inReplyTo,
-    },
-  });
+  const createdLog = await prisma.messageLog.create({ data: outboundLogData });
 
   return NextResponse.json({
     ok: true,

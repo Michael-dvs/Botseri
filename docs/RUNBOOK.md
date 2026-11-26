@@ -74,7 +74,10 @@ WAHA menerapkan antrean berbobot prioritas untuk mencegah kebanjiran chat pelang
 - **Prioritas P1 (Operasional Owner):** `CHAT_MASUK`, `MORNING_BRIEF`, `WORK_HOURS_REMINDER`, `END_OF_DAY_EVAL`, `CONFIRMATION_REPLY`.
 - **Prioritas P2 (Pelanggan):** `CUSTOMER_REPLY`, `CUSTOM_REPLY`.
 - **Pembersihan Pesan Basi (TTL 120s):** Pesan P2 yang mengantre lebih dari 120 detik dibatalkan otomatis agar pelanggan tidak menerima balasan basi.
-- **Reservasi Kuota:** Dari batas 4 pesan per menit, 1 slot direservasi khusus untuk P0 (P1 dan P2 maksimal 3 pesan/menit). Dari 25 pesan per jam, 5 slot direservasi khusus untuk P0 (P1 dan P2 maksimal 20 pesan/jam).
+- **Reservasi Kuota:** Dari batas 8 pesan per menit, 1 slot direservasi khusus untuk P0 (P1 dan P2 maksimal 7 pesan/menit). Dari 60 pesan per jam, 5 slot direservasi khusus untuk P0 (P1 dan P2 maksimal 55 pesan/jam).
+- **Kuota Pelanggan:** Maksimal 40 pesan keluar per jam per chat pelanggan. Kuota global dan reservasi P0 tetap berlaku sehingga kuota global dapat menahan pengiriman lebih dahulu.
+- **Antrean Tunda 202:** Hanya pembatasan window global (`WAHA_RATE_LIMIT_BLOCKED`) yang dialihkan ke background. Jeda minimal 5 detik dihitung sampai slot menit/jam tersedia. Pengiriman ulang melewati pemeriksaan window global, tetapi tetap memvalidasi penerima, circuit breaker, dan kuota pelanggan. Pengiriman berhasil dicatat ke `message_log`.
+- **Batas Durabilitas:** Timer background berada di memori proses dashboard. Restart proses sebelum timer berjalan dapat membatalkan pengiriman; respons 202 bukan bukti pesan sudah diterima WhatsApp.
 
 ### 2.5 Circuit Breaker dan Prosedur Reset Guard
 Jika pengiriman WAHA gagal 3 kali berturut-turut atau menerima indikasi pembatasan (restriction/banned/spam), Circuit Breaker akan aktif (status `COOLDOWN` selama 30 menit) dan statusnya dipersistensikan ke tabel `runtime_flags`.

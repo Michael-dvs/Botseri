@@ -18,8 +18,9 @@ export const T2_ORDER_FORM = `Baik Kak! Silakan lengkapi formulir pesanan di baw
 
 _Salin dan isi format di atas lalu kirim kembali ke chat ini ya Kak!_ 🌸`;
 
-export const T3_PAUSE_NOTICE = `Siap Kak! Pertanyaan Kakak sudah kami sampaikan ke Owner Berseri.
-Saat ini bot kami jeda sejenak agar *Owner kami bisa langsung membalas chat Kakak secara manual* di sini. Mohon ditunggu sebentar ya Kak! ☕🌸`;
+export const T3_PAUSE_NOTICE = `Siap Kak! Pertanyaan Kakak sudah kami teruskan ke Minri (Admin Berseri).
+
+Bot kami jeda sejenak agar Minri bisa langsung membantu Kakak secara manual di sini ya. Mohon ditunggu sebentar ya Kak! ☕🌸`;
 
 export const T5_REMINDER = `Mohon maaf Kak, kami belum menangkap pilihannya 🙏
 Balas *1* untuk langsung pesan, atau *2* untuk tanya-tanya dulu ya Kak.`;
@@ -91,15 +92,18 @@ export function orderConfirmation(order: ConfirmedOrderData): string {
   return lines.join("\n");
 }
 
-export function ownerAlert(phone: string, lastMessage: string | null | undefined): string {
-  const sanitized = (lastMessage || "")
+export function ownerAlert(phone: string, customerContext: string | null | undefined): string {
+  const sanitized = (customerContext || "")
     .replace(/[\x00-\x1F\x7F]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 300);
 
-  return `🔔 *Halo Owner Berseri! Ada Pelanggan Butuh Bantuan Manual*
+  return `🔔 *Halo Minri! Ada Pelanggan Butuh Bantuan!!* 🌸
+
 • *Nomor Pelanggan:* ${phone}
-• *Pesan Terakhir:* "${sanitized}"
-_(Bot otomatis dinonaktifkan sementara untuk nomor ini. Silakan balas chat langsung di WhatsApp. Jika pelanggan deal memesan, kirim format pesanan di chat tersebut agar bot mencatat otomatis.)_`;
+• *Pesan / Pertanyaan Pelanggan:*
+"${sanitized}"
+
+(Bot otomatis dinonaktifkan sementara untuk nomor ini. Silakan balas chat langsung di WhatsApp. Jika pelanggan deal memesan, kirim format pesanan di chat tersebut agar bot mencatat otomatis.)`;
 }

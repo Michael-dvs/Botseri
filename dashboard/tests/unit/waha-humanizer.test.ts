@@ -109,12 +109,13 @@ describe("WAHA Anti-Ban Humanizer (INV-13)", () => {
       );
     });
 
-    it("rejects unauthorized recipients unless isPairing is true", async () => {
+    it.each([false, true])("validates recipients with bypassRateCheck=%s", async (bypassRateCheck) => {
       await expect(
         sendHumanizedMessage({
           chatId: "6289999999999@c.us",
           text: "Halo orang asing",
           skipDelay: true,
+          bypassRateCheck,
         }),
       ).rejects.toThrowError(
         expect.objectContaining({
@@ -129,17 +130,17 @@ describe("WAHA Anti-Ban Humanizer (INV-13)", () => {
         text: "Konfirmasi pairing",
         isPairing: true,
         skipDelay: true,
+        bypassRateCheck,
       });
       expect(result.ok).toBe(true);
     });
   });
 
-  describe("3. Sliding-Window Rate Limiter (Max 4 msgs / 60s)", () => {
-    it("allows up to 4 messages within 1 minute, and blocks the 5th with 429", async () => {
+  describe("3. Sliding-Window Rate Limiter (Max 8 msgs / 60s)", () => {
+    it("allows 8 messages within 1 minute and blocks the 9th with 429", async () => {
       const chatId = "6281111111111@c.us";
 
-      // 4 messages must succeed
-      for (let i = 1; i <= 4; i++) {
+      for (let i = 1; i <= 8; i++) {
         const res = await sendHumanizedMessage({
           chatId,
           text: `Pesan nomor ${i}`,
@@ -149,11 +150,10 @@ describe("WAHA Anti-Ban Humanizer (INV-13)", () => {
         expect(res.ok).toBe(true);
       }
 
-      // 5th message must be blocked by rate-limiter
       await expect(
         sendHumanizedMessage({
           chatId,
-          text: "Pesan nomor 5 yang melanggar batas",
+          text: "Pesan nomor 9 yang melanggar batas",
           trigger: "TASK_ALARM",
           skipDelay: true,
         }),
@@ -194,7 +194,7 @@ describe("WAHA Anti-Ban Humanizer (INV-13)", () => {
 
       // 4th call must be blocked immediately by circuit breaker without calling WAHA!
       await expect(
-        sendHumanizedMessage({ chatId, text: "Panggilan 4", skipDelay: true }),
+        sendHumanizedMessage({ chatId, text: "Panggilan 4", skipDelay: true, bypassRateCheck: true }),
       ).rejects.toThrowError(
         expect.objectContaining({
           code: "WAHA_CIRCUIT_BREAKER_OPEN",

@@ -1,4 +1,5 @@
 import type { PipelineConfigData, PipelineGraph } from "./schema";
+import { T3_PAUSE_NOTICE } from "@/lib/customer/templates";
 
 export type PresetKey = "FLORIST_DECOR" | "GENERIC_COMMERCE" | "PERSONAL_ASSISTANT";
 
@@ -202,8 +203,7 @@ _Salin dan isi format di atas lalu kirim kembali ke chat ini ya Kak!_ 🌸`,
   },
   cs_handover: {
     enabled: true,
-    handover_customer_text: `Siap Kak! Pertanyaan Kakak sudah kami sampaikan ke Owner Berseri.
-Saat ini bot kami jeda sejenak agar *Owner kami bisa langsung membalas chat Kakak secara manual* di sini. Mohon ditunggu sebentar ya Kak! ☕🌸`,
+    handover_customer_text: T3_PAUSE_NOTICE,
     pause_ttl_hours: 24,
     notify_owner: true,
     owner_handover_alert_template: `🔔 *Halo Owner Berseri! Ada Pelanggan Butuh Bantuan Manual*

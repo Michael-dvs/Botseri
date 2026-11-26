@@ -128,6 +128,52 @@ interface ReplyItem {
   chat_id?: string;
   trigger_type?: string;
 }
+const NON_SUBSTANTIVE_INPUTS: Record<string, true> = {
+  "1": true, "2": true, "3": true, "4": true, "5": true,
+  p: true, halo: true, hai: true, hi: true, tes: true, menu: true, start: true,
+};
+
+function isSubstantiveInquiry(value: unknown): value is string {
+  return typeof value === "string" &&
+    value.trim().length > 10 &&
+    !NON_SUBSTANTIVE_INPUTS[value.trim().toLowerCase()];
+}
+
+async function getOwnerCustomerContext(
+  phone: string,
+  metadata: Record<string, unknown>,
+  currentMessage: string
+): Promise<string> {
+  const initialInquiry = metadata.initial_inquiry;
+  if (isSubstantiveInquiry(initialInquiry)) {
+    return initialInquiry.trim();
+  }
+
+  const messageLog = prisma.messageLog;
+  if (messageLog && typeof messageLog.findFirst === "function") {
+    try {
+      const lastTextMessage = await messageLog.findFirst({
+        where: {
+          chat_id: `${phone.replace(/\D/g, "")}@c.us`,
+          direction: "INBOUND",
+          body: { notIn: ["1", "2", "3", "4", "5", "halo", "hi", "menu"] },
+        },
+        orderBy: { created_at: "desc" },
+      });
+      if (isSubstantiveInquiry(lastTextMessage?.body)) {
+        return lastTextMessage.body.trim();
+      }
+    } catch (error) {
+      console.error("Failed to load customer inquiry for owner alert:", error);
+    }
+  }
+
+  return typeof initialInquiry === "string" && initialInquiry.trim()
+    ? initialInquiry.trim()
+    : currentMessage.trim();
+}
+
+
 
 
 export async function POST(request: Request) {
@@ -173,6 +219,12 @@ export async function POST(request: Request) {
 
     const stateBefore = session.state;
     const meta = (session.metadata as Record<string, unknown> | null) || {};
+    const openingMessage = message_text.trim();
+    if (stateBefore === "INIT") {
+      meta.initial_inquiry = openingMessage;
+    } else if (stateBefore === "AWAITING_CHOICE" && isSubstantiveInquiry(openingMessage)) {
+      meta.initial_inquiry = openingMessage;
+    }
 
     // 5. Idempotensi: jika message_id sama dengan metadata.last_message_id, jangan proses ulang
     if (message_id && meta.last_message_id === message_id) {
@@ -240,9 +292,12 @@ export async function POST(request: Request) {
       greetingConf.ask_trigger_keywords
     );
     const replies: ReplyItem[] = [];
+    const cleanInput = message_text.trim().toLowerCase();
+    const isGreetingOrMenu = session.state === "AWAITING_CHOICE" &&
+      /^(halo|hai|hi|menu|p|halo berseri|start)$/i.test(cleanInput);
 
     // Check custom branch routing from visual graph (e.g. branch_3 on node-router)
-    if (session.state === "AWAITING_CHOICE") {
+    if (session.state === "AWAITING_CHOICE" && !isGreetingOrMenu) {
       try {
         const graph: PipelineGraph = (pipeline.config.graph?.nodes?.length
           ? pipeline.config.graph
@@ -309,40 +364,31 @@ export async function POST(request: Request) {
 
         const routerId = routerNode?.id || "node-router";
         const routerData = (routerNode?.data as Record<string, unknown>) || {};
-        const branches = (Array.isArray(routerData.branches) && routerData.branches.length > 0)
+        const branches = Array.isArray(routerData.branches)
           ? (routerData.branches as Array<{ id: string; label: string; keywords: string[] }>)
-          : [
-              { id: "branch_1", label: "Pilihan 1 (Order)", keywords: ["1", "pesan", "order"] },
-              { id: "branch_2", label: "Pilihan 2 (Tanya)", keywords: ["2", "tanya", "cs"] },
-              { id: "branch_3", label: "Pilihan 3 (Katalog)", keywords: ["3", "katalog", "menu"] },
-            ];
+          : [];
 
-        const cleanInput = message_text.trim().toLowerCase();
+        let handoverNode: PipelineGraphNode | undefined;
 
         // 1. Check custom branches first (e.g. branch_3, branch_4)
         for (const branch of branches) {
           if (branch.id === "branch_1" || branch.id === "branch_2") continue;
-          const isBranch3 = branch.id === "branch_3" || branch.id.includes("catalog") || branch.id.includes("katalog");
           const branchKeywords = Array.isArray(branch.keywords) ? branch.keywords : [];
-          const isMatch =
-            (isBranch3 && (cleanInput === "3" || cleanInput.includes("katalog") || cleanInput.includes("menu"))) ||
-            branchKeywords.some((kw) => {
-              const cleanKw = String(kw).toLowerCase().trim();
-              if (!cleanKw) return false;
-              return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
-            });
+          const isMatch = branchKeywords.some((kw) => {
+            const cleanKw = String(kw).toLowerCase().trim();
+            if (!cleanKw) return false;
+            return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+          });
 
-          if (isMatch) {
-            const branchEdge = graph.edges.find(
-              (e) =>
-                e.source === routerId &&
-                (e.sourceHandle === branch.id ||
-                 e.sourceHandle?.toLowerCase().includes(branch.id.toLowerCase()) ||
-                 (!e.sourceHandle && branch.id === "branch_3"))
-            );
-            const targetNode = branchEdge
-              ? graph.nodes.find((n) => n.id === branchEdge.target)
-              : undefined;
+          const branchEdge = graph.edges.find(
+            (e) => e.source === routerId && e.sourceHandle === branch.id
+          );
+          if (isMatch && branchEdge) {
+            const targetNode = graph.nodes.find((n) => n.id === branchEdge.target);
+            if (targetNode?.type === "CS_HANDOVER") {
+              handoverNode = targetNode;
+              break;
+            }
 
             const chainedReplies = executeChainedCustomNodes(
               routerId,
@@ -372,18 +418,6 @@ export async function POST(request: Request) {
                   trigger_type: "CUSTOMER_REPLY",
                 });
               }
-            }
-
-            if (chainedReplies.length === 0) {
-              const defaultKatalogText = "Silakan cek katalog lengkap kami di https://berseri.id/katalog ya Kak!\nBalas 1 untuk Pesan, atau 2 untuk Tanya Admin.";
-              chainedReplies.push({
-                to: session.phone_e164,
-                phone_e164: session.phone_e164,
-                chat_id: `${session.phone_e164.replace(/\D/g, "")}@c.us`,
-                body: defaultKatalogText,
-                text: defaultKatalogText,
-                trigger_type: "CUSTOMER_REPLY",
-              });
             }
 
             for (const item of chainedReplies) {
@@ -432,30 +466,22 @@ export async function POST(request: Request) {
 
         // 2. Cabang 1 (Order)
         const b1 = branches.find((b) => b.id === "branch_1");
-        const b1Keywords = Array.isArray(b1?.keywords) && b1.keywords.length > 0
-          ? b1.keywords
-          : greetingConf.order_trigger_keywords || ["1", "pesan", "order", "beli"];
-        const isB1Match =
-          cleanInput === "1" ||
-          b1Keywords.some((kw) => {
-            const cleanKw = String(kw).toLowerCase().trim();
-            if (!cleanKw) return false;
-            return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
-          });
+        const b1Keywords = Array.isArray(b1?.keywords) ? b1.keywords : [];
+        const isB1Match = b1Keywords.some((kw) => {
+          const cleanKw = String(kw).toLowerCase().trim();
+          if (!cleanKw) return false;
+          return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+        });
 
-        if (isB1Match) {
-          const b1Edge = graph.edges.find(
-            (e) =>
-              e.source === routerId &&
-              (e.sourceHandle === "branch_1" ||
-               e.sourceHandle?.toLowerCase().includes("branch_1") ||
-               e.sourceHandle?.toLowerCase().includes("order") ||
-               e.sourceHandle?.toLowerCase().includes("pesan"))
-          );
-          const targetNode = b1Edge
-            ? graph.nodes.find((n) => n.id === b1Edge.target)
-            : graph.nodes.find((n) => n.type === "ORDER_FORM_PROCESSOR" || n.id === "node-form");
-
+        const b1Edge = graph.edges.find(
+          (e) => e.source === routerId && e.sourceHandle === "branch_1"
+        );
+        const orderTargetNode = b1Edge ? graph.nodes.find((n) => n.id === b1Edge.target) : undefined;
+        if (!handoverNode && isB1Match && orderTargetNode?.type === "CS_HANDOVER") {
+          handoverNode = orderTargetNode;
+        }
+        if (!handoverNode && isB1Match && b1Edge) {
+          const targetNode = orderTargetNode;
           const formText =
             (targetNode ? extractNodeMessageText(targetNode) : "") ||
             (formConf.enabled ? (formConf.form_template_text || T2_ORDER_FORM) : T2_ORDER_FORM);
@@ -495,34 +521,26 @@ export async function POST(request: Request) {
 
         // 3. Cabang 2 (Konsultasi / Tanya)
         const b2 = branches.find((b) => b.id === "branch_2");
-        const b2Keywords = Array.isArray(b2?.keywords) && b2.keywords.length > 0
-          ? b2.keywords
-          : greetingConf.ask_trigger_keywords || ["2", "tanya", "konsultasi", "cs", "admin"];
-        const isB2Match =
-          cleanInput === "2" ||
-          b2Keywords.some((kw) => {
-            const cleanKw = String(kw).toLowerCase().trim();
-            if (!cleanKw) return false;
-            return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
-          });
+        const b2Keywords = Array.isArray(b2?.keywords) ? b2.keywords : [];
+        const isB2Match = b2Keywords.some((kw) => {
+          const cleanKw = String(kw).toLowerCase().trim();
+          if (!cleanKw) return false;
+          return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+        });
 
-        if (isB2Match) {
-          const b2Edge = graph.edges.find(
-            (e) =>
-              e.source === routerId &&
-              (e.sourceHandle === "branch_2" ||
-               e.sourceHandle?.toLowerCase().includes("branch_2") ||
-               e.sourceHandle?.toLowerCase().includes("tanya") ||
-               e.sourceHandle?.toLowerCase().includes("cs") ||
-               e.sourceHandle?.toLowerCase().includes("handover"))
+        const b2Edge = graph.edges.find(
+          (e) => e.source === routerId && e.sourceHandle === "branch_2"
+        );
+        if (handoverNode || (isB2Match && b2Edge)) {
+          const targetNode = handoverNode || (b2Edge ? graph.nodes.find((n) => n.id === b2Edge.target) : undefined);
+          const handoverText = renderPipelineTemplate(
+            extractNodeMessageText(targetNode) || T3_PAUSE_NOTICE,
+            {
+              customer_name: session.customer_name || "Pelanggan",
+              customer_phone: session.phone_e164,
+              last_message: message_text,
+            }
           );
-          const targetNode = b2Edge
-            ? graph.nodes.find((n) => n.id === b2Edge.target)
-            : graph.nodes.find((n) => n.type === "CS_HANDOVER" || n.id === "node-handover");
-
-          const handoverText =
-            (targetNode ? extractNodeMessageText(targetNode) : "") ||
-            (handoverConf.enabled ? (handoverConf.handover_customer_text || T3_PAUSE_NOTICE) : T3_PAUSE_NOTICE);
 
           replies.push({
             to: session.phone_e164,
@@ -533,30 +551,24 @@ export async function POST(request: Request) {
             trigger_type: "CUSTOMER_REPLY",
           });
 
-          if (!handoverConf.enabled || handoverConf.notify_owner) {
-            try {
-              const primaryOwner = await getPrimaryOwner();
-              if (primaryOwner) {
-                const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
-                const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
-                const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-                const alertTemplate = handoverConf.owner_handover_alert_template || ownerAlert(session.phone_e164, message_text);
-                const alertText = renderPipelineTemplate(alertTemplate, {
-                  customer_phone: session.phone_e164,
-                  last_message: sanitized,
-                });
-                replies.push({
-                  to: ownerPhone,
-                  phone_e164: primaryOwner.phone_e164 || ownerPhone,
-                  chat_id: ownerChatId,
-                  body: alertText,
-                  text: alertText,
-                  trigger_type: "CUSTOMER_REPLY",
-                });
-              }
-            } catch (ownerPauseAlertErr) {
-              console.error("Failed to prepare owner alert, continuing with customer reply:", ownerPauseAlertErr);
+          try {
+            const primaryOwner = await getPrimaryOwner();
+            if (primaryOwner) {
+              const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
+              const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
+              const customerContext = await getOwnerCustomerContext(session.phone_e164, meta, message_text);
+              const alertText = ownerAlert(session.phone_e164, customerContext);
+              replies.push({
+                to: ownerPhone,
+                phone_e164: primaryOwner.phone_e164 || ownerPhone,
+                chat_id: ownerChatId,
+                body: alertText,
+                text: alertText,
+                trigger_type: "CUSTOMER_REPLY",
+              });
             }
+          } catch (ownerPauseAlertErr) {
+            console.error("Failed to prepare owner alert, continuing with customer reply:", ownerPauseAlertErr);
           }
 
           const updatedMetadata: Prisma.InputJsonValue = {
@@ -610,9 +622,7 @@ export async function POST(request: Request) {
             }
           }
           const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
-          const baseFallback =
-            routerFallbackText ||
-            "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai menu ya Kak.";
+          const baseFallback = routerFallbackText || greetingConf.unrecognized_choice_text || T5_REMINDER;
           const fallbackReplyText = `${baseFallback} (Kesempatan ${currentRetries}/3)`;
           replies.push({
             to: session.phone_e164,
@@ -665,8 +675,8 @@ export async function POST(request: Request) {
             if (primaryOwner) {
               const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
               const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
-              const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-              const alertText = `🔔 *Pemberitahuan: Bantuan Pelanggan* 🌸\n\nAda pelanggan yang salah memasukkan pilihan menu sebanyak 3x:\n• Nomor: ${session.phone_e164}\n• Pesan Terakhir: "${sanitized}"\n\nBot telah otomatis dijeda untuk nomor ini agar Minri bisa membantu secara langsung di WhatsApp.`;
+              const customerContext = await getOwnerCustomerContext(session.phone_e164, meta, message_text);
+              const alertText = ownerAlert(session.phone_e164, customerContext);
 
               replies.push({
                 to: ownerPhone,
@@ -746,8 +756,7 @@ export async function POST(request: Request) {
     let updatedCustomerName: string | null = session.customer_name;
 
     // 5. Execute Actions
-    if (transResult.action === "SEND_GREETING") {
-      // Simpul node-greeting HANYA boleh dieksekusi jika sesi berstatus INIT
+    if (isGreetingOrMenu || transResult.action === "SEND_GREETING") {
       if (session.state === "AWAITING_ORDER") {
         return NextResponse.json({
           ok: true,
@@ -859,47 +868,48 @@ export async function POST(request: Request) {
       stateAfter = "PAUSED_FOR_OWNER";
       nextRetryCount = 0;
 
-      const handoverText = handoverConf.enabled ? (handoverConf.handover_customer_text || T3_PAUSE_NOTICE) : T3_PAUSE_NOTICE;
+      const handoverText = handoverConf.handover_customer_text?.trim() || T3_PAUSE_NOTICE;
       replies.push({
         to: customer_phone,
+        phone_e164: customer_phone,
+        chat_id: `${customer_phone.replace(/\D/g, "")}@c.us`,
+        trigger_type: "CUSTOMER_REPLY",
         text: handoverText,
         body: handoverText,
       });
 
       // Query primary owner to alert (with auto-healing)
-      if (!handoverConf.enabled || handoverConf.notify_owner) {
-        try {
-          const primaryOwner = await getPrimaryOwner();
-          if (primaryOwner) {
-            const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
-            const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
-            const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-            const alertTemplate = handoverConf.owner_handover_alert_template || ownerAlert(customer_phone, message_text);
-            const alertText = renderPipelineTemplate(alertTemplate, {
+      try {
+        const primaryOwner = await getPrimaryOwner();
+        if (primaryOwner) {
+          const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
+          const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
+          const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+          const alertTemplate = handoverConf.owner_handover_alert_template || ownerAlert(customer_phone, message_text);
+          const alertText = renderPipelineTemplate(alertTemplate, {
+            customer_phone,
+            last_message: sanitized,
+          });
+          replies.push({
+            to: ownerPhone,
+            phone_e164: ownerPhone,
+            chat_id: ownerChatId,
+            body: alertText,
+            text: alertText,
+            trigger_type: "CUSTOMER_REPLY",
+          });
+        } else {
+          console.error(
+            JSON.stringify({
+              level: "WARN",
+              source: "customer_handle",
+              message: "No primary owner found in authorized_numbers to alert",
               customer_phone,
-              last_message: sanitized,
-            });
-            replies.push({
-              to: ownerPhone,
-              phone_e164: ownerPhone,
-              chat_id: ownerChatId,
-              body: alertText,
-              text: alertText,
-              trigger_type: "CUSTOMER_REPLY",
-            });
-          } else {
-            console.error(
-              JSON.stringify({
-                level: "WARN",
-                source: "customer_handle",
-                message: "No primary owner found in authorized_numbers to alert",
-                customer_phone,
-              })
-            );
-          }
-        } catch (ownerPauseAlertErr) {
-          console.error("Failed to prepare owner pause alert, continuing with customer pause notice:", ownerPauseAlertErr);
+            })
+          );
         }
+      } catch (ownerPauseAlertErr) {
+        console.error("Failed to prepare owner pause alert, continuing with customer pause notice:", ownerPauseAlertErr);
       }
     } else if (transResult.action === "STAY_SILENT") {
       stateAfter = "PAUSED_FOR_OWNER";
@@ -1187,8 +1197,8 @@ export async function POST(request: Request) {
           if (primaryOwner) {
             const ownerPhone = primaryOwner.phone_e164 || primaryOwner.chat_id;
             const ownerChatId = primaryOwner.chat_id || `${ownerPhone.replace(/\D/g, "")}@c.us`;
-            const sanitized = (message_text || "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-            const alertText = `🔔 *Pemberitahuan: Bantuan Pelanggan* 🌸\n\nAda pelanggan yang salah memasukkan pilihan menu sebanyak 3x:\n• Nomor: ${customer_phone}\n• Pesan Terakhir: "${sanitized}"\n\nBot telah otomatis dijeda untuk nomor ini agar Minri bisa membantu secara langsung di WhatsApp.`;
+            const customerContext = await getOwnerCustomerContext(session.phone_e164, meta, message_text);
+            const alertText = ownerAlert(session.phone_e164, customerContext);
 
             replies.push({
               to: ownerPhone,

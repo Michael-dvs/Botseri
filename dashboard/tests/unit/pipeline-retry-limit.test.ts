@@ -99,9 +99,7 @@ describe("Aturan 3 Kali Kesempatan (3-Strike Fallback Rule & Auto-Handover to Mi
     vi.clearAllMocks();
     authMock.mockReturnValue(true);
     pipelineConfigFindUniqueMock.mockResolvedValue({
-      id: "active-pipeline",
-      config: testConfig,
-      is_active: true,
+      config_json: testConfig,
       version: 1,
     });
     authorizedNumberFindFirstMock.mockImplementation((args?: { where?: Record<string, unknown> }) => {
@@ -170,7 +168,7 @@ describe("Aturan 3 Kali Kesempatan (3-Strike Fallback Rule & Auto-Handover to Mi
       expect(res.nextState).toBe("PAUSED_FOR_OWNER");
       expect(res.replies).toHaveLength(2);
       expect(res.replies[0]).toContain("kami teruskan langsung ke Minri");
-      expect(res.replies[1]).toContain("Pemberitahuan: Bantuan Pelanggan");
+      expect(res.replies[1]).toContain("*Halo Minri! Ada Pelanggan Butuh Bantuan!!*");
       const updateAction = res.actions.find((a) => a.type === "UPDATE_SESSION");
       expect(updateAction?.nextState).toBe("PAUSED_FOR_OWNER");
       expect(updateAction?.retryCount).toBe(0);
@@ -200,7 +198,12 @@ describe("Aturan 3 Kali Kesempatan (3-Strike Fallback Rule & Auto-Handover to Mi
         id: "sess-retry-1",
         phone_e164: "+628123456789",
         state: "AWAITING_CHOICE",
-        metadata: { retry_count: 0, current_router_id: "node-router" },
+        metadata: {
+          retry_count: 0,
+          current_router_id: "node-router",
+          last_unread_message: "2",
+          draft: { nama_pemesan: "Andi" },
+        },
       });
       customerSessionUpdateManyMock.mockResolvedValue({ count: 1 });
 
@@ -225,7 +228,12 @@ describe("Aturan 3 Kali Kesempatan (3-Strike Fallback Rule & Auto-Handover to Mi
           where: { id: "sess-retry-1", state: "AWAITING_CHOICE" },
           data: expect.objectContaining({
             state: "AWAITING_CHOICE",
-            metadata: expect.objectContaining({ retry_count: 1 }),
+            metadata: expect.objectContaining({
+              retry_count: 1,
+              current_router_id: "node-router",
+              last_unread_message: "2",
+              draft: { nama_pemesan: "Andi" },
+            }),
           }),
         })
       );
@@ -256,7 +264,7 @@ describe("Aturan 3 Kali Kesempatan (3-Strike Fallback Rule & Auto-Handover to Mi
       expect(data.state_after).toBe("PAUSED_FOR_OWNER");
       expect(data.replies).toHaveLength(2);
       expect(data.replies[0].text).toContain("kami teruskan langsung ke Minri");
-      expect(data.replies[1].text).toContain("Pemberitahuan: Bantuan Pelanggan");
+      expect(data.replies[1].text).toContain("*Halo Minri! Ada Pelanggan Butuh Bantuan!!*");
       expect(data.replies[1].trigger_type).toBe("OWNER_DIGEST");
 
       expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(

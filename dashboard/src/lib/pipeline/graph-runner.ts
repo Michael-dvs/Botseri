@@ -6,6 +6,7 @@ import type {
 import { renderPipelineTemplate } from "./manager";
 import { recordEvent } from "@/lib/events";
 import { projectCoreConfig } from "./projector";
+import { T3_PAUSE_NOTICE } from "@/lib/customer/templates";
 
 export interface CustomReplyPayload {
   to: string;
@@ -27,6 +28,13 @@ export function extractNodeMessageText(
   if (!node || !node.data) return "";
 
   const data = node.data;
+  if (node.type === "CS_HANDOVER") {
+    const message = typeof data.message_template === "string" ? data.message_template.trim() : "";
+    const body = typeof data.body === "string" ? data.body.trim() : "";
+    const configured = typeof data.handover_customer_text === "string" ? data.handover_customer_text.trim() : "";
+    return message || body || configured || T3_PAUSE_NOTICE;
+  }
+
   const rawText =
     data.message_template ||
     data.greeting_text ||

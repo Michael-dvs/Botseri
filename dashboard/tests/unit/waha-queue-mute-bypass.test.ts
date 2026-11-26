@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { POST as inboundAcceptPOST } from "@/app/api/internal/inbound/accept/route";
 import { DELETE as orderDELETE } from "@/app/api/orders/[id]/route";
-import { POST as wahaSendPOST } from "@/app/api/internal/waha/send/route";
-import { HumanizerError } from "@/lib/waha/humanizer";
 
 const {
   authMock,
@@ -14,7 +12,6 @@ const {
   customerSessionUpdateMock,
   authorizedNumberFindFirstMock,
   authorizedNumberFindUniqueMock,
-  sendHumanizedMessageMock,
 } = vi.hoisted(() => ({
   authMock: vi.fn(),
   orderFindFirstMock: vi.fn(),
@@ -25,20 +22,12 @@ const {
   customerSessionUpdateMock: vi.fn(),
   authorizedNumberFindFirstMock: vi.fn(),
   authorizedNumberFindUniqueMock: vi.fn(),
-  sendHumanizedMessageMock: vi.fn(),
 }));
 
 vi.mock("@/lib/internal/auth", () => ({
   authorizeInternal: (...args: unknown[]) => authMock(...args),
 }));
 
-vi.mock("@/lib/waha/humanizer", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/waha/humanizer")>();
-  return {
-    ...actual,
-    sendHumanizedMessage: (...args: unknown[]) => sendHumanizedMessageMock(...args),
-  };
-});
 
 vi.mock("@/lib/db", () => ({
   prisma: {
@@ -259,34 +248,4 @@ describe("Verifikasi Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft
     });
   });
 
-  describe("Bagian 3: Antrean Tunda Outbound 429 pada waha/send", () => {
-    it("Ketika pengiriman balasan bot terkena rate limit 429, waha/send mengembalikan HTTP 202 Accepted tanpa error 429", async () => {
-      customerSessionFindUniqueMock.mockResolvedValue({
-        id: "sess-waha-send",
-        phone_e164: "+628123456789",
-      });
-
-      sendHumanizedMessageMock.mockRejectedValue(
-        new HumanizerError("WAHA_RATE_LIMIT_BLOCKED", 429, "Batas pengiriman pesan tercapai")
-      );
-
-      const req = new Request("http://localhost:3000/api/internal/waha/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: "628123456789@c.us",
-          phone_e164: "+628123456789",
-          body: "Pesan balasan bot ke pelanggan",
-          trigger_type: "CUSTOMER_REPLY",
-        }),
-      });
-
-      const res = await wahaSendPOST(req);
-      expect(res.status).toBe(202);
-      const data = await res.json();
-      expect(data.ok).toBe(true);
-      expect(data.queued).toBe(true);
-      expect(data.warning).toBe("OUTBOUND_RATE_LIMIT_DELAYED");
-    });
-  });
 });

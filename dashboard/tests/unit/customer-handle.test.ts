@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "@/app/api/internal/customer/handle/route";
 import { OrderPaymentStatus } from "@prisma/client";
 import { FLORIST_DECOR_PRESET } from "@/lib/pipeline/presets";
+import { runPipelineStep } from "@/lib/pipeline/engine";
+import type { PipelineGraph } from "@/lib/pipeline/schema";
+import { T3_PAUSE_NOTICE } from "@/lib/customer/templates";
 
 const {
   authMock,
@@ -163,15 +166,14 @@ describe("POST /api/internal/customer/handle", () => {
     expect(data.replies).toHaveLength(2);
     // Reply to customer
     expect(data.replies[0].to).toBe("+628123456789");
-    expect(data.replies[0].text).toContain("Saat ini bot kami jeda sejenak");
     // Alert to primary owner
     expect(data.replies[1].to).toBe("+628999999999");
-    expect(data.replies[1].text).toContain("Halo Owner Berseri! Ada Pelanggan Butuh Bantuan Manual");
+    expect(data.replies[1].text).toContain("Halo Minri! Ada Pelanggan Butuh Bantuan!!");
     expect(data.replies[1].text).toContain("+628123456789");
   });
 
   // Case 3: Lanjut "kapan buka?" saat PAUSED -> replies: [], state tetap PAUSED_FOR_OWNER
-  it("Case 3: Message 'kapan buka?' when PAUSED_FOR_OWNER returns empty replies", async () => {
+  it.each(["kapan buka?", "menu", "halo"])("keeps an unexpired paused session silent for %s", async (text) => {
     customerSessionFindUniqueMock.mockResolvedValue({
       id: "sess-1",
       phone_e164: "+628123456789",
@@ -183,7 +185,7 @@ describe("POST /api/internal/customer/handle", () => {
 
     const req = makeRequest({
       customer_phone: "+628123456789",
-      message_text: "kapan buka?",
+      message_text: text,
       message_id: "msg-3",
     });
 
@@ -310,7 +312,7 @@ describe("POST /api/internal/customer/handle", () => {
     });
     expect(data.replies).toHaveLength(2);
     expect(data.replies[1].to).toBe("+628777777777");
-    expect(data.replies[1].text).toContain("Halo Owner Berseri! Ada Pelanggan Butuh Bantuan Manual");
+    expect(data.replies[1].text).toContain("Halo Minri! Ada Pelanggan Butuh Bantuan!!");
   });
 
   // Case 5: Kirim form yang sama dengan message_id sama -> idempotensi aktif, tidak ada order kedua
@@ -397,7 +399,6 @@ describe("POST /api/internal/customer/handle", () => {
     expect(data.ok).toBe(true);
     expect(data.replies).toHaveLength(1);
     expect(data.replies[0].to).toBe("+628123456789");
-    expect(data.replies[0].text).toContain("Saat ini bot kami jeda sejenak");
   });
 
   // Case 8: Paused session expired -> behaves as ACTIVE, text 'halo' restarts menu
@@ -965,68 +966,247 @@ describe("POST /api/internal/customer/handle", () => {
     expect(data.replies[0].text).not.toContain("Ini sapaan awal toko");
   });
 
-  it("Case 16: Unrecognized input in AWAITING_CHOICE returns deterministic fallback and retains current_router_id", async () => {
-    const pipelineConfig = {
-      ...FLORIST_DECOR_PRESET,
-      graph: {
-        nodes: [
-          {
-            id: "node-router-sub",
-            type: "CONDITION_ROUTER" as const,
-            position: { x: 400, y: 0 },
-            data: {
-              branches: [
-                { id: "branch_1", label: "Pilihan 1", keywords: ["1"] },
-                { id: "branch_2", label: "Pilihan 2", keywords: ["2"] },
-              ],
-              // fallback_reply_text sengaja tidak diisi agar menguji default deterministik
-            },
+  it.each([
+    { branchId: "branch_3", keywords: undefined, text: "3", connected: false },
+    { branchId: "branch_3", keywords: undefined, text: "katalog", connected: false },
+    { branchId: "branch_3", keywords: [], text: "3", connected: true },
+    { branchId: "branch_3", keywords: ["", "   "], text: "3", connected: true },
+    { branchId: "branch_3", keywords: ["lihat"], text: "3", connected: true },
+    { branchId: "branch_3", keywords: ["3"], text: "3", connected: false },
+    { branchId: "branch_1", keywords: undefined, text: "1", connected: true },
+    { branchId: "branch_1", keywords: [], text: "1", connected: true },
+    { branchId: "branch_2", keywords: undefined, text: "2", connected: true },
+    { branchId: "branch_2", keywords: [" "], text: "2", connected: true },
+    { branchId: "branch_3", keywords: ["3"], text: "3", connected: true, accepted: true },
+    { branchId: "branch_3", keywords: ["lihat"], text: "LIHAT", connected: true, accepted: true },
+  ])("matches only active router keywords: $branchId / $keywords / $text / connected=$connected", async ({ branchId, keywords, text, connected, accepted = false }) => {
+    const fallback = "Mohon maaf, pilihan belum sesuai.";
+    const configuredReply = "Balasan dari node graf aktif.";
+    const branches = [
+      { id: "branch_1", label: "Pesan", keywords: ["1"] },
+      { id: "branch_2", label: "Tanya", keywords: ["2"] },
+    ].filter((branch) => branch.id !== branchId);
+    if (keywords !== undefined) branches.push({ id: branchId, label: "Cabang", keywords });
+    const graph: PipelineGraph = {
+      nodes: [
+        {
+          id: "node-router",
+          type: "CONDITION_ROUTER",
+          position: { x: 0, y: 0 },
+          data: {
+            branches: [{ id: "branch_3", label: "Katalog", keywords: ["3", "katalog", "menu"] }],
+            fallback_reply_text: "Fallback router akar, bukan router aktif.",
           },
-        ],
-        edges: [],
-      },
+        },
+        {
+          id: "active-router",
+          type: "CONDITION_ROUTER",
+          position: { x: 100, y: 0 },
+          data: { branches, fallback_reply_text: fallback },
+        },
+        {
+          id: "active-reply",
+          type: "CUSTOM_WA_REPLY",
+          position: { x: 200, y: 0 },
+          data: { message_template: configuredReply },
+        },
+      ],
+      edges: connected
+        ? [{ id: "active-edge", source: "active-router", sourceHandle: branchId, target: "active-reply" }]
+        : [],
     };
-
+    const config = { ...FLORIST_DECOR_PRESET, graph };
     pipelineConfigFindUniqueMock.mockResolvedValue({
-      id: 1,
-      name: "Pipeline Fallback",
-      preset_key: "FLORIST_DECOR",
-      config_json: pipelineConfig,
-      version: 5,
+      id: 1, preset_key: "FLORIST_DECOR", config_json: config, version: 5,
     });
-
     customerSessionFindUniqueMock.mockResolvedValue({
-      id: "sess-sub-chain-3",
+      id: "sess-active-router",
       phone_e164: "+628123456789",
       state: "AWAITING_CHOICE",
-      customer_name: "Andi",
-      paused_at: null,
-      metadata: { current_router_id: "node-router-sub", retry_count: 0 },
-    });
-    customerSessionUpdateManyMock.mockResolvedValue({ count: 1 });
-
-    const req = makeRequest({
-      customer_phone: "+628123456789",
-      message_text: "99",
-      message_id: "msg-invalid-99",
+      metadata: { current_router_id: "active-router", retry_count: 0 },
     });
 
-    const res = await POST(req);
-    expect(res.status).toBe(200);
-    const data = await res.json();
-    expect(data.ok).toBe(true);
-    expect(data.state_after).toBe("AWAITING_CHOICE");
-    expect(data.replies[0].text).toContain("pilihan belum sesuai format");
-    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          state: "AWAITING_CHOICE",
-          metadata: expect.objectContaining({
-            current_router_id: "node-router-sub",
-            retry_count: 1,
-          }),
-        }),
-      })
+    const result = runPipelineStep(
+      { config, sessionState: "AWAITING_CHOICE", currentRouterId: "active-router" },
+      { text }
     );
+    const response = await POST(makeRequest({
+      customer_phone: "+628123456789", message_text: text, message_id: "active-router-input",
+    }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    const expectedText = accepted ? configuredReply : `${fallback} (Kesempatan 1/3)`;
+    expect(result.replies).toEqual([expectedText]);
+    expect(body.replies.map((reply: { text: string }) => reply.text)).toEqual([expectedText]);
+    expect(body.state_after).toBe("AWAITING_CHOICE");
+    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        metadata: expect.objectContaining({
+          current_router_id: accepted ? null : "active-router",
+          retry_count: accepted ? 0 : 1,
+        }),
+      }),
+    }));
+  });
+
+  it.each([
+    {
+      branchId: "branch_2",
+      data: { message_template: "Minri akan membantu {{customer_name}}.", body: "Body tidak dipilih.", handover_customer_text: "Teks editor tidak dipilih." },
+      expected: "Minri akan membantu Andi.",
+    },
+    {
+      branchId: "custom_cs",
+      data: { message_template: "   ", body: "Admin untuk {{customer_phone}}.", handover_customer_text: "Teks editor tidak dipilih." },
+      expected: "Admin untuk +628123456789.",
+    },
+    {
+      branchId: "branch_1",
+      data: { handover_customer_text: "Teks jeda dari editor kanvas." },
+      expected: "Teks jeda dari editor kanvas.",
+    },
+    { branchId: "branch_2", data: {}, expected: T3_PAUSE_NOTICE },
+    { branchId: "custom_cs", data: { message_template: "", body: "" }, expected: T3_PAUSE_NOTICE },
+    { branchId: "branch_1", data: { message_template: " ", body: "\n", handover_customer_text: "\t" }, expected: T3_PAUSE_NOTICE },
+  ])("sends farewell and alerts primary owner before pausing via $branchId: $data", async ({ branchId, data, expected }) => {
+    const customerPhone = "+628123456789";
+    const ownerPhone = "+628999999999";
+    const graph: PipelineGraph = {
+      nodes: [
+        {
+          id: "active-router", type: "CONDITION_ROUTER", position: { x: 0, y: 0 },
+          data: { branches: [{ id: branchId, label: "Tanya CS", keywords: ["2"] }] },
+        },
+        { id: "handover", type: "CS_HANDOVER", position: { x: 100, y: 0 }, data },
+      ],
+      edges: [{ id: "handover-edge", source: "active-router", sourceHandle: branchId, target: "handover" }],
+    };
+    const config = {
+      ...FLORIST_DECOR_PRESET,
+      cs_handover: {
+        ...FLORIST_DECOR_PRESET.cs_handover,
+        notify_owner: false,
+        handover_customer_text: "Konfigurasi global tidak boleh menimpa node.",
+        owner_handover_alert_template: "Pelanggan {{customer_phone}}: {{last_message}}",
+      },
+      graph,
+    };
+    pipelineConfigFindUniqueMock.mockResolvedValue({ id: 1, config_json: config, version: 5 });
+    authorizedNumberFindFirstMock.mockResolvedValue({
+      id: "owner", phone_e164: ownerPhone, is_owner: true, is_primary: true,
+    });
+    customerSessionFindUniqueMock.mockResolvedValue({
+      id: "sess-farewell", phone_e164: customerPhone, state: "AWAITING_CHOICE",
+      customer_name: "Andi",
+      metadata: { current_router_id: "active-router", retry_count: 1, last_unread_message: "2" },
+    });
+
+    const result = runPipelineStep(
+      { config, sessionState: "AWAITING_CHOICE", currentRouterId: "active-router", sampleVars: { customer_name: "Andi" } },
+      { text: "2", customerPhone }
+    );
+    const response = await POST(makeRequest({
+      customer_phone: customerPhone, message_text: "2", message_id: "farewell-input",
+    }));
+    const body = await response.json();
+    expect(body.replies).toEqual([
+      expect.objectContaining({ to: customerPhone, text: expected, body: expected, trigger_type: "CUSTOMER_REPLY" }),
+      expect.objectContaining({
+        to: ownerPhone,
+        text: expect.stringContaining("Halo Minri! Ada Pelanggan Butuh Bantuan!!"),
+      }),
+    ]);
+    expect(body.state_after).toBe("PAUSED_FOR_OWNER");
+    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        state: "PAUSED_FOR_OWNER",
+        paused_at: expect.any(Date),
+        metadata: expect.objectContaining({
+          retry_count: 0, last_unread_message: "2", last_message_id: "farewell-input",
+        }),
+      }),
+    }));
+    expect(result.replies).toEqual([expected]);
+    expect(result.actions).toContainEqual({
+      type: "SEND_MESSAGE", to: customerPhone, text: expected, trigger_type: "CUSTOMER_REPLY",
+    });
+    expect(result.actions).toContainEqual({ type: "CS_HANDOVER", customerPhone, lastMessage: "2" });
+    expect(result.actions).toContainEqual({
+      type: "UPDATE_SESSION", nextState: "PAUSED_FOR_OWNER", pausedAt: expect.any(Date),
+      retryCount: 0, nextRouterId: null,
+    });
+    expect(result.activeEdgeIds).toEqual(["handover-edge"]);
+  });
+
+  it.each([
+    { text: "halo", retrigger: true },
+    { text: "hai", retrigger: true },
+    { text: "hi", retrigger: true },
+    { text: "menu", retrigger: true },
+    { text: "p", retrigger: true },
+    { text: "halo berseri", retrigger: true },
+    { text: "start", retrigger: true },
+    { text: "  MeNu \n", retrigger: true },
+    { text: "halo kak", retrigger: false },
+    { text: "halogen", retrigger: false },
+  ])("reopens the main menu only for exact greeting commands: $text", async ({ text, retrigger }) => {
+    const mainMenu = "Menu utama dari graf tersimpan.";
+    const fallback = "Pilihan submenu belum sesuai.";
+    const graph: PipelineGraph = {
+      nodes: [
+        { id: "sub-menu", type: "MESSAGE_MENU", position: { x: 0, y: 0 }, data: { message_text: "Menu turunan, bukan menu utama." } },
+        {
+          id: "sub-router", type: "CONDITION_ROUTER", position: { x: 100, y: 0 },
+          data: { branches: [{ id: "branch_2", label: "CS", keywords: ["menu"] }], fallback_reply_text: fallback },
+        },
+        { id: "handover", type: "CS_HANDOVER", position: { x: 200, y: 0 }, data: {} },
+        { id: "trigger", type: "TRIGGER_INBOUND", position: { x: 0, y: 100 }, data: {} },
+        { id: "main-menu", type: "MESSAGE_MENU", position: { x: 100, y: 100 }, data: { message_text: mainMenu } },
+        { id: "root-router", type: "CONDITION_ROUTER", position: { x: 200, y: 100 }, data: { branches: [] } },
+      ],
+      edges: [
+        { id: "e-sub", source: "sub-router", sourceHandle: "branch_2", target: "handover" },
+        { id: "e-main", source: "trigger", sourceHandle: "out_customer", target: "main-menu" },
+        { id: "e-root", source: "main-menu", sourceHandle: "out_next", target: "root-router" },
+      ],
+    };
+    const config = { ...FLORIST_DECOR_PRESET, graph };
+    const metadata = {
+      current_router_id: "sub-router", retry_count: retrigger ? 2 : 0,
+      draft: { nama_pemesan: "Andi" }, last_unread_message: "tetap",
+    };
+    pipelineConfigFindUniqueMock.mockResolvedValue({ id: 1, config_json: config, version: 5 });
+    customerSessionFindUniqueMock.mockResolvedValue({
+      id: "sess-menu", phone_e164: "+628123456789", state: "AWAITING_CHOICE", metadata,
+    });
+
+    const result = runPipelineStep({
+      config, sessionState: "AWAITING_CHOICE", currentRouterId: "sub-router", retryCount: metadata.retry_count,
+    }, { text });
+    const response = await POST(makeRequest({
+      customer_phone: "+628123456789", message_text: text, message_id: "retrigger-menu",
+    }));
+    const body = await response.json();
+    const expectedText = retrigger ? mainMenu : `${fallback} (Kesempatan 1/3)`;
+    const expectedRouter = retrigger ? "root-router" : "sub-router";
+    const expectedRetry = retrigger ? 0 : 1;
+    expect(body.state_after).toBe("AWAITING_CHOICE");
+    expect(body.replies).toEqual([expect.objectContaining({ to: "+628123456789", text: expectedText })]);
+    expect(result.replies).toEqual([expectedText]);
+    expect(result.actions).toContainEqual({
+      type: "UPDATE_SESSION", nextState: "AWAITING_CHOICE", nextRouterId: expectedRouter, retryCount: expectedRetry,
+      ...(text.trim().length > 10 && !/^(halo|hai|hi|menu|p|halo berseri|start)$/i.test(text.trim())
+        ? { initialInquiry: text.trim() }
+        : {}),
+    });
+    expect(customerSessionUpdateManyMock).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        state: "AWAITING_CHOICE",
+        metadata: {
+          ...metadata, current_router_id: expectedRouter, retry_count: expectedRetry, last_message_id: "retrigger-menu",
+        },
+      }),
+    }));
+    expect(authorizedNumberFindFirstMock).not.toHaveBeenCalled();
   });
 });

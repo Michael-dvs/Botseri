@@ -7,6 +7,7 @@ import type {
 import { renderPipelineTemplate } from "./manager";
 import { executeChainedCustomNodes, extractNodeMessageText, findDownstreamRouter } from "./graph-runner";
 import { looksLikeOrderForm, parseOrderForm, type OrderDraft } from "@/lib/customer/orderFormat";
+import { ownerAlert, T1_GREETING, T3_PAUSE_NOTICE } from "@/lib/customer/templates";
 
 export interface PipelineContext {
   config: PipelineConfigData;
@@ -18,6 +19,7 @@ export interface PipelineContext {
   retryCount?: number;
   pausedExpired?: boolean;
   customerPhone?: string;
+  initialInquiry?: string;
 }
 
 export interface PipelineInput {
@@ -29,7 +31,7 @@ export interface PipelineInput {
 
 export type PipelineAction =
   | { type: "SEND_MESSAGE"; to?: string; text: string; trigger_type: string }
-  | { type: "UPDATE_SESSION"; nextState: CustomerSessionState; nextRouterId?: string | null; draft?: Record<string, unknown> | null; pausedAt?: Date | null; retryCount?: number }
+  | { type: "UPDATE_SESSION"; nextState: CustomerSessionState; nextRouterId?: string | null; draft?: Record<string, unknown> | null; pausedAt?: Date | null; retryCount?: number; initialInquiry?: string }
   | { type: "CREATE_ORDER"; draft: Record<string, unknown> }
   | { type: "CS_HANDOVER"; customerPhone?: string; lastMessage: string }
   | { type: "PAUSE_BOT"; until?: Date | null };
@@ -241,8 +243,14 @@ export function runPipelineStep(
     };
   }
 
-  // 4. Sesi Baru (INIT) atau Percakapan Baru (ACTIVE)
-  if (effectiveState === "INIT" || effectiveState === "ACTIVE") {
+  const cleanInput = input.text.trim().toLowerCase();
+  const isGreetingOrMenu = effectiveState === "AWAITING_CHOICE" &&
+    /^(halo|hai|hi|menu|p|halo berseri|start)$/i.test(cleanInput);
+  const hasSubstantiveInput = input.text.trim().length > 10 &&
+    !/^(1|2|3|4|5|halo|hai|hi|menu|p|tes|start)$/i.test(cleanInput);
+  const inquiryUpdate = hasSubstantiveInput ? input.text.trim() : ctx.initialInquiry;
+  const customerInquiry = inquiryUpdate || input.text.trim();
+  if (effectiveState === "INIT" || effectiveState === "ACTIVE" || isGreetingOrMenu) {
     const greetingEdge = graph.edges.find(
       (e) => (e.source === triggerNode?.id || e.source === "node-trigger") &&
              (e.sourceHandle === "out_customer" || e.sourceHandle === "Pelanggan Baru" || !e.sourceHandle)
@@ -262,7 +270,7 @@ export function runPipelineStep(
     const greetingText =
       extractNodeMessageText(greetingNode) ||
       config.customer_greeting?.greeting_text ||
-      "Halo, selamat datang di Berseri Florist & Decor!";
+      T1_GREETING;
 
     let initialRouterId: string | null = null;
     if (greetingNode) {
@@ -288,6 +296,12 @@ export function runPipelineStep(
       type: "UPDATE_SESSION",
       nextState: "AWAITING_CHOICE",
       nextRouterId: initialRouterId,
+      retryCount: 0,
+      ...(effectiveState === "INIT"
+        ? { initialInquiry: input.text.trim() }
+        : ctx.initialInquiry
+          ? { initialInquiry: ctx.initialInquiry }
+          : {}),
     });
     log.push("Pelanggan baru terhubung: Mengirim sapaan & menu.");
 
@@ -344,30 +358,23 @@ export function runPipelineStep(
     const routerData = (routerNode?.data as Record<string, unknown>) || {};
     const branches = Array.isArray(routerData.branches)
       ? (routerData.branches as Array<{ id: string; label: string; keywords: string[] }>)
-      : null;
+      : [];
 
-    const cleanInput = input.text.trim().toLowerCase();
+    let selectedHandoverNode: PipelineGraphNode | undefined;
 
     // 5a. Evaluasi Cabang Kustom terlebih dahulu (mis. branch_3, branch_4, branch_sub_1)
     if (branches) {
       for (const branch of branches) {
         if (branch.id === "branch_1" || branch.id === "branch_2") continue;
-        const isBranch3 = branch.id === "branch_3" || branch.id.includes("catalog") || branch.id.includes("katalog");
         const branchKeywords = Array.isArray(branch.keywords) ? branch.keywords : [];
-        const isMatch =
-          (isBranch3 && cleanInput === "3") ||
-          branchKeywords.some((kw) => {
-            const cleanKw = String(kw).toLowerCase().trim();
-            if (!cleanKw) return false;
-            return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
-          });
+        const isMatch = branchKeywords.some((kw) => {
+          const cleanKw = String(kw).toLowerCase().trim();
+          if (!cleanKw) return false;
+          return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+        });
 
         const branchEdge = graph.edges.find(
-          (e) =>
-            e.source === routerId &&
-            (e.sourceHandle === branch.id ||
-             e.sourceHandle?.toLowerCase().includes(branch.id.toLowerCase()) ||
-             (!e.sourceHandle && branch.id === "branch_3"))
+          (e) => e.source === routerId && e.sourceHandle === branch.id
         );
 
         if (branchEdge && isMatch) {
@@ -375,6 +382,10 @@ export function runPipelineStep(
           visited.push(branchEdge.target);
 
           const targetNode = graph.nodes.find((n) => n.id === branchEdge.target);
+          if (targetNode?.type === "CS_HANDOVER") {
+            selectedHandoverNode = targetNode;
+            break;
+          }
           const chainedReplies = executeChainedCustomNodes(routerId, branch.id, graph, sampleVars);
 
           if (chainedReplies.length > 0) {
@@ -432,39 +443,25 @@ export function runPipelineStep(
     }
 
     // 5b. Evaluasi Cabang 1 (Order / Pesan)
-    const b1 = branches?.find((b) => b.id === "branch_1");
-    const b1Keywords = Array.isArray(b1?.keywords)
-      ? b1.keywords
-      : config.customer_greeting?.order_trigger_keywords || ["1", "pesan", "order", "beli"];
-    const isB1Match =
-      cleanInput === "1" ||
-      b1Keywords.some((kw) => {
-        const cleanKw = String(kw).toLowerCase().trim();
-        if (!cleanKw) return false;
-        return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
-      });
+    const b1 = branches.find((b) => b.id === "branch_1");
+    const b1Keywords = Array.isArray(b1?.keywords) ? b1.keywords : [];
+    const isB1Match = b1Keywords.some((kw) => {
+      const cleanKw = String(kw).toLowerCase().trim();
+      if (!cleanKw) return false;
+      return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+    });
 
-    if (isB1Match) {
-      const b1Edge = graph.edges.find(
-        (e) =>
-          e.source === routerId &&
-          (e.sourceHandle === "branch_1" ||
-           e.sourceHandle?.toLowerCase().includes("branch_1") ||
-           e.sourceHandle?.toLowerCase().includes("order") ||
-           e.sourceHandle?.toLowerCase().includes("pesan"))
-      );
-      if (b1Edge) {
-        activeEdges.push(b1Edge.id);
-        visited.push(b1Edge.target);
-      } else {
-        const fNode = graph.nodes.find((n) => n.type === "ORDER_FORM_PROCESSOR" || n.id === "node-form");
-        if (fNode) visited.push(fNode.id);
-      }
-
-      const formNode =
-        (b1Edge ? graph.nodes.find((n) => n.id === b1Edge.target) : null) ||
-        graph.nodes.find((n) => n.type === "ORDER_FORM_PROCESSOR" || n.id === "node-form");
-
+    const b1Edge = graph.edges.find(
+      (e) => e.source === routerId && e.sourceHandle === "branch_1"
+    );
+    const orderTargetNode = b1Edge ? graph.nodes.find((n) => n.id === b1Edge.target) : undefined;
+    if (!selectedHandoverNode && isB1Match && orderTargetNode?.type === "CS_HANDOVER") {
+      selectedHandoverNode = orderTargetNode;
+    }
+    if (!selectedHandoverNode && isB1Match && b1Edge) {
+      activeEdges.push(b1Edge.id);
+      visited.push(b1Edge.target);
+      const formNode = orderTargetNode;
       const formText =
         extractNodeMessageText(formNode) ||
         config.order_form?.form_template_text ||
@@ -496,55 +493,38 @@ export function runPipelineStep(
     }
 
     // 5c. Evaluasi Cabang 2 (Tanya / CS Handover)
-    const b2 = branches?.find((b) => b.id === "branch_2");
-    const b2Keywords = Array.isArray(b2?.keywords)
-      ? b2.keywords
-      : config.customer_greeting?.ask_trigger_keywords || ["2", "tanya", "konsultasi", "admin"];
-    const isB2Match =
-      cleanInput === "2" ||
-      b2Keywords.some((kw) => {
-        const cleanKw = String(kw).toLowerCase().trim();
-        if (!cleanKw) return false;
-        return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
-      });
+    const b2 = branches.find((b) => b.id === "branch_2");
+    const b2Keywords = Array.isArray(b2?.keywords) ? b2.keywords : [];
+    const isB2Match = b2Keywords.some((kw) => {
+      const cleanKw = String(kw).toLowerCase().trim();
+      if (!cleanKw) return false;
+      return cleanInput === cleanKw || new RegExp(`\\b${cleanKw}\\b`, "i").test(cleanInput);
+    });
 
-    if (isB2Match) {
-      const b2Edge = graph.edges.find(
-        (e) =>
-          e.source === routerId &&
-          (e.sourceHandle === "branch_2" ||
-           e.sourceHandle?.toLowerCase().includes("branch_2") ||
-           e.sourceHandle?.toLowerCase().includes("tanya") ||
-           e.sourceHandle?.toLowerCase().includes("cs") ||
-           e.sourceHandle?.toLowerCase().includes("handover"))
+    const b2Edge = graph.edges.find(
+      (e) => e.source === routerId && e.sourceHandle === "branch_2"
+    );
+    if (selectedHandoverNode || (isB2Match && b2Edge)) {
+      if (!selectedHandoverNode && b2Edge) activeEdges.push(b2Edge.id);
+      const handoverNode = selectedHandoverNode || (b2Edge ? graph.nodes.find((n) => n.id === b2Edge.target) : undefined);
+      if (handoverNode && !visited.includes(handoverNode.id)) visited.push(handoverNode.id);
+      if (selectedHandoverNode && selectedHandoverNode === orderTargetNode && b1Edge) activeEdges.push(b1Edge.id);
+      const handoverText = renderPipelineTemplate(
+        extractNodeMessageText(handoverNode) || T3_PAUSE_NOTICE,
+        sampleVars
       );
-      if (b2Edge) {
-        activeEdges.push(b2Edge.id);
-        visited.push(b2Edge.target);
-      } else {
-        const hNode = graph.nodes.find((n) => n.type === "CS_HANDOVER" || n.id === "node-handover");
-        if (hNode) visited.push(hNode.id);
-      }
-
-      const handoverNode =
-        (b2Edge ? graph.nodes.find((n) => n.id === b2Edge.target) : null) ||
-        graph.nodes.find((n) => n.type === "CS_HANDOVER" || n.id === "node-handover");
-
-      const handoverText =
-        extractNodeMessageText(handoverNode) ||
-        config.cs_handover?.handover_customer_text ||
-        "Siap Kak! Pertanyaan sudah kami sampaikan ke Owner.";
 
       replies.push(handoverText);
       actions.push({
         type: "SEND_MESSAGE",
+        to: input.customerPhone || ctx.customerPhone || sampleVars.customer_phone,
         text: handoverText,
         trigger_type: "CUSTOMER_REPLY",
       });
       actions.push({
         type: "CS_HANDOVER",
-        customerPhone: ctx.customerPhone || sampleVars.customer_phone,
-        lastMessage: input.text,
+        customerPhone: input.customerPhone || ctx.customerPhone || sampleVars.customer_phone,
+        lastMessage: customerInquiry,
       });
       actions.push({
         type: "UPDATE_SESSION",
@@ -552,6 +532,7 @@ export function runPipelineStep(
         pausedAt: new Date(),
         retryCount: 0,
         nextRouterId: null,
+        ...(inquiryUpdate ? { initialInquiry: inquiryUpdate } : {}),
       });
 
       return {
@@ -591,9 +572,7 @@ export function runPipelineStep(
         }
       }
       const routerFallbackText = (routerData.fallback_reply_text as string)?.trim();
-      const baseFallback =
-        routerFallbackText ||
-        "Mohon maaf Kak, pilihan belum sesuai format 🙏\nSilakan balas dengan mengetik angka 1, 2, atau 3 sesuai menu ya Kak.";
+      const baseFallback = routerFallbackText || config.customer_greeting.unrecognized_choice_text;
       const fallbackMsg = `${baseFallback} (Kesempatan ${currentRetries}/3)`;
       replies.push(fallbackMsg);
       actions.push({
@@ -606,6 +585,7 @@ export function runPipelineStep(
         nextState: "AWAITING_CHOICE",
         retryCount: currentRetries,
         nextRouterId: nextRouterIdAfterFallback,
+        ...(inquiryUpdate ? { initialInquiry: inquiryUpdate } : {}),
       });
       log.push(`Input tidak cocok (kesalahan ${currentRetries}/3). Mengirimkan pengingat format.`);
 
@@ -622,7 +602,10 @@ export function runPipelineStep(
       // Kesalahan ke-3: Auto-Handover ke Minri (Owner)
       const transitionMsg =
         "Mohon maaf Kak, tampaknya pilihan belum sesuai 🙏\nAgar lebih mudah, chat Kakak kami teruskan langsung ke Minri (Admin Berseri) ya. Bot kami jeda sejenak, mohon ditunggu sebentar ya Kak! ☕🌸";
-      const ownerAlertMsg = `🔔 *Pemberitahuan: Bantuan Pelanggan* 🌸\n\nAda pelanggan yang salah memasukkan pilihan menu sebanyak 3x:\n• Nomor: ${ctx.customerPhone || sampleVars.customer_phone || "Pelanggan"}\n• Pesan Terakhir: "${(input.text || "").slice(0, 300)}"\n\nBot telah otomatis dijeda untuk nomor ini agar Minri bisa membantu secara langsung di WhatsApp.`;
+      const ownerAlertMsg = ownerAlert(
+        ctx.customerPhone || sampleVars.customer_phone || "Pelanggan",
+        customerInquiry
+      );
 
       replies.push(transitionMsg);
       replies.push(ownerAlertMsg);
@@ -643,6 +626,7 @@ export function runPipelineStep(
         pausedAt: new Date(),
         retryCount: 0,
         nextRouterId: null,
+        ...(inquiryUpdate ? { initialInquiry: inquiryUpdate } : {}),
       });
       log.push("Input tidak cocok 3x berturut-turut. Mengaktifkan jeda dan meneruskan ke Minri.");
 

@@ -30,6 +30,11 @@ Dokumentasi kronologis seluruh pembaruan sistem, penambahan modul, route API, ko
 - [[2026-11-05] Aturan 3-Strike Fallback & Auto-Handover Minri pada Pilihan Pelanggan](#2026-11-05-aturan-3-strike-fallback--auto-handover-minri-pada-pilihan-pelanggan)
 - [[2026-11-05] Perbaikan Outbound 429 Queue, Mute Bypass Keyword (MENU/BARU), & Soft-Delete Orders](#2026-11-05-perbaikan-outbound-429-queue-mute-bypass-keyword-menubaru--soft-delete-orders)
 - [[2026-11-05] Pembisuan Ketat Saat Pesanan Aktif & Penegasan Pelepasan Sesi Pasca-Pesanan](#2026-11-05-pembisuan-ketat-saat-pesanan-aktif--penegasan-pelepasan-sesi-pasca-pesanan)
+- [[2026-11-06] Pembersihan Katalog Statis dan Evaluasi Router Aktif](#2026-11-06-pembersihan-katalog-statis-dan-evaluasi-router-aktif)
+- [[2026-11-06] Pesan Perpisahan Handover CS dan Preservasi Metadata](#2026-11-06-pesan-perpisahan-handover-cs-dan-preservasi-metadata)
+- [[2026-11-06] Retrigger Menu pada AWAITING_CHOICE dan Pelonggaran Kuota](#2026-11-06-retrigger-menu-pada-awaiting_choice-dan-pelonggaran-kuota)
+- [[2026-11-06] Perbaikan Pengiriman Tertunda dan Jeda Window Dinamis](#2026-11-06-perbaikan-pengiriman-tertunda-dan-jeda-window-dinamis)
+- [[2026-11-06] Konteks Pertanyaan Awal pada Alert Handover Minri](#2026-11-06-konteks-pertanyaan-awal-pada-alert-handover-minri)
 ---
 
 ### Format Standar Entri Pembaruan
@@ -2365,4 +2370,190 @@ Menerapkan profil staging, pengujian integrasi end-to-end, evaluasi prompt terot
 
 ### 6. Known Issues / Catatan Operasional
 - Pelanggan yang memiliki pesanan aktif dijamin tidak akan pernah menerima interupsi dari bot sampai staf menyelesaikan atau membatalkan pesanan tersebut di dashboard.
+
+## [2026-11-06] Pembersihan Katalog Statis dan Evaluasi Router Aktif
+
+### 1. Ringkasan Pekerjaan
+- Menghapus balasan katalog statis dari `dashboard/src/app/api/internal/customer/handle/route.ts`.
+- Route pelanggan dan `dashboard/src/lib/pipeline/engine.ts` hanya mencocokkan keyword cabang yang terdaftar pada router aktif. Tidak ada lagi pencocokan otomatis angka 1/2/3 atau kata katalog/menu di luar keyword graf.
+- Keyword kosong atau berisi spasi tidak cocok. Cabang harus memiliki koneksi dengan `source` router aktif dan `sourceHandle` yang sama persis dengan ID cabang.
+- Input yang tidak cocok memakai `fallback_reply_text` router aktif; jika teks tersebut tidak diisi, memakai konfigurasi pengingat yang sudah ada, bukan teks katalog statis.
+- Aturan retry, penanda kesempatan, handover pada kesalahan ketiga, dan pemulihan pointer basi tidak diubah.
+- Menambahkan 13 skenario regresi bersama untuk route dan engine. Memperbaiki fixture konfigurasi retry yang memakai properti `config` alih-alih `config_json`, serta mendeklarasikan cabang order pada fixture sub-router. Menghapus assertion yang mengunci wording fallback bawaan.
+
+### 2. Commit Git
+- Tidak membuat commit pada pengerjaan ini.
+
+### 3. Migrasi dan Rollback
+- Tidak ada migrasi database, perubahan kredensial, atau perubahan konfigurasi graf tersimpan.
+- Pemulihan kode harus mencakup route, engine, dan fixture pengujian terkait.
+
+### 4. Bukti Verifikasi
+- `cd dashboard && npm test -- --run`: 52 berkas, 478 pengujian lulus.
+- `cd dashboard && npm run test:integration`: 8 pengujian lulus.
+- `cd dashboard && npx tsc --noEmit`: exit code 0.
+- `cd dashboard && npm run lint`: tidak ada warning atau error ESLint.
+- Smoke langsung melalui `npx tsx -e`: pilihan 3 pada router akar menjalankan balasan node graf dan berpindah ke router kedua; pilihan 3 pada router kedua dengan keyword kosong menghasilkan fallback router kedua dan mempertahankan pointer; pilihan 1 berikutnya menuju `AWAITING_ORDER`.
+- Pencarian `berseri.id/katalog` pada `dashboard/src/`: 0 temuan.
+- Pemeriksaan R-02 pada source dan berkas pengujian yang diubah: 0 karakter em dash.
+
+### 5. Known Issues / Catatan Operasional
+- Suite lulus masih mengeluarkan peringatan deprecation Vite CJS dan log skenario error/mock event, LLM, serta heartbeat. Pembersihan log tersebut di luar cakupan perubahan router.
+- Container belum dibangun ulang dan WhatsApp fisik belum diuji. Graf tersimpan harus mendefinisikan keyword dan koneksi secara eksplisit untuk setiap pilihan yang ingin diaktifkan.
+
+## [2026-11-06] Pesan Perpisahan Handover CS dan Preservasi Metadata
+
+### 1. Ringkasan Pekerjaan
+- Menempatkan default pesan jeda Minri yang diminta pada `T3_PAUSE_NOTICE` dan memakainya kembali pada preset florist, route pelanggan, dan engine.
+- Untuk simpul `CS_HANDOVER`, teks dipilih dari `message_template`, lalu `body`, lalu field editor kanvas yang sudah ada (`handover_customer_text`). Nilai kosong/spasi diabaikan; tanpa teks node, dipakai default pesan jeda. Template dirender dengan konteks pelanggan.
+- Cabang kustom maupun cabang order yang langsung menuju `CS_HANDOVER` kini menjalankan jalur handover yang sama dengan Tanya CS: balasan pelanggan, alert owner utama, lalu `PAUSED_FOR_OWNER` dengan `paused_at`.
+- Alert owner utama wajib pada handover, termasuk saat konfigurasi lama `notify_owner` bernilai false. Kegagalan pencarian owner tetap tidak menghilangkan balasan pelanggan.
+- Mempertahankan shallow copy metadata fallback yang sudah ada. Regresi memastikan `current_router_id`, `last_unread_message`, dan draft tetap tersimpan saat retry bertambah.
+- Teks katalog tetap bersumber dari graf; tidak menambahkan URL atau balasan katalog statis.
+
+### 2. Berkas yang Diperbarui
+- `dashboard/src/lib/customer/templates.ts`
+- `dashboard/src/lib/pipeline/presets.ts`
+- `dashboard/src/lib/pipeline/graph-runner.ts`
+- `dashboard/src/lib/pipeline/engine.ts`
+- `dashboard/src/app/api/internal/customer/handle/route.ts`
+- `dashboard/tests/unit/customer-handle.test.ts`
+- `dashboard/tests/unit/pipeline-retry-limit.test.ts`
+- `updates.md`
+
+### 3. Commit Git
+- Tidak membuat commit pada pengerjaan ini.
+
+### 4. Migrasi dan Rollback
+- Tidak ada migrasi database atau perubahan konfigurasi graf tersimpan.
+- Pemulihan kode harus mencakup template, preset, extractor, route, engine, dan regresi terkait.
+
+### 5. Bukti Verifikasi
+- Smoke langsung dengan `cd dashboard && npx tsx -e`: cabang kustom menuju handover dengan teks kosong menghasilkan default pesan pelanggan, action `CS_HANDOVER`, dan update sesi `PAUSED_FOR_OWNER` dengan timestamp `pausedAt`.
+- `cd dashboard && npm run test:integration`: 8 pengujian lulus.
+- `cd dashboard && npm test -- --run`: 52 berkas, 484 pengujian lulus, termasuk enam skenario baru handover pada route dan engine.
+- `cd dashboard && npx tsc --noEmit && npm run lint`: exit code 0; tidak ada warning atau error ESLint.
+- Pencarian `berseri.id/katalog` pada `dashboard/src/`: 0 temuan.
+- Pemeriksaan R-02 pada source dan pengujian yang diperbarui: 0 karakter em dash.
+
+### 6. Known Issues / Catatan Operasional
+- Tipe simpul aktual adalah `CS_HANDOVER`; tidak menambahkan alias tipe graf baru.
+- Teks node yang sudah terisi tetap diprioritaskan. Pengiriman WhatsApp tetap melalui konsumen `replies` yang sudah ada, bukan pengiriman langsung dari route.
+- Suite lulus masih mengeluarkan peringatan Vite CJS serta log skenario kegagalan/mock event, LLM, dan heartbeat yang sudah ada.
+- Container belum dibangun ulang dan penerimaan pesan di WhatsApp fisik belum diuji.
+
+## [2026-11-06] Retrigger Menu pada AWAITING_CHOICE dan Pelonggaran Kuota
+
+### 1. Ringkasan Pekerjaan
+- Pada `AWAITING_CHOICE`, input yang persis cocok dengan `halo`, `hai`, `hi`, `menu`, `p`, `halo berseri`, atau `start` setelah trim dan lowercase menampilkan ulang menu utama.
+- Route dan engine memakai jalur sapaan yang sudah ada: memilih node pesan utama dari koneksi trigger pelanggan, lalu konfigurasi sapaan/T1 sebagai fallback. Tidak menambahkan teks WhatsApp statis pada route atau engine.
+- Retrigger mempertahankan `AWAITING_CHOICE`, mereset retry menjadi 0, dan mengembalikan `current_router_id` ke router menu utama agar pilihan berikutnya dievaluasi pada menu yang ditampilkan. Metadata lain tetap tersimpan.
+- Sapaan tidak membuka sesi `PAUSED_FOR_OWNER` yang belum kedaluwarsa dan tidak mengubah guard pesanan aktif.
+- Kuota keluar per chat pelanggan dinaikkan dari 12 menjadi 40 pesan/jam. Plafon global per menit dinaikkan dari 4 menjadi 8, dengan satu slot tetap direservasi untuk P0 sehingga P1/P2 mendapat 7 slot/menit. Pesan error menampilkan batas prioritas yang benar.
+
+### 2. Berkas yang Diperbarui
+- `dashboard/src/app/api/internal/customer/handle/route.ts`
+- `dashboard/src/lib/pipeline/engine.ts`
+- `dashboard/src/lib/waha/humanizer.ts`
+- `dashboard/tests/unit/customer-handle.test.ts`
+- `dashboard/tests/unit/pipeline-parity.test.ts`
+- `dashboard/tests/unit/waha-humanizer.test.ts`
+- `dashboard/tests/unit/waha-priority-guard.test.ts`
+- `docs/RUNBOOK.md`
+- `updates.md`
+
+### 3. Commit Git
+- Tidak membuat commit pada pengerjaan ini.
+
+### 4. Migrasi dan Rollback
+- Tidak ada migrasi database, perubahan kredensial, atau perubahan konfigurasi graf tersimpan.
+- Pemulihan kode harus mencakup route, engine, humanizer, pengujian batas kuota, dan dokumentasi operasional terkait.
+
+### 5. Bukti Verifikasi
+- Smoke langsung melalui `cd dashboard && npx tsx -e`: input `MeNu` dengan spasi pada sub-router dan retry 2 menghasilkan menu utama, router `node-router`, state `AWAITING_CHOICE`, dan action reset retry 0. Input `menu` pada sesi pause menghasilkan `replies: []`.
+- `cd dashboard && npm test -- --run`: 52 berkas, 497 pengujian lulus. Regresi mencakup tujuh perintah retrigger, variasi huruf/spasi, input bukan retrigger, preservasi metadata, sesi pause, slot reservasi P0, dan batas kuota pelanggan pada 39/40 pesan sebelumnya.
+- `cd dashboard && npm run test:integration`: 8 pengujian lulus.
+- `cd dashboard && npx tsc --noEmit && npm run lint`: exit code 0; tidak ada warning atau error ESLint.
+- Pemeriksaan R-02 pada source dan pengujian yang diubah: 0 karakter em dash.
+
+### 6. Known Issues / Catatan Operasional
+- Batas global per jam tetap 25 untuk P0 dan 20 untuk P1/P2. Batas ini dapat menahan pengiriman sebelum kuota pelanggan 40/jam tercapai.
+- Retrigger adalah pencocokan seluruh input, bukan substring; `halo kak` dan `halogen` bukan perintah retrigger.
+- Suite lulus masih mengeluarkan peringatan Vite CJS serta log skenario kegagalan/mock event, LLM, dan heartbeat yang sudah ada.
+- Container belum dibangun ulang dan WhatsApp fisik belum diuji.
+
+## [2026-11-06] Perbaikan Pengiriman Tertunda dan Jeda Window Dinamis
+
+### 1. Ringkasan Pekerjaan
+- Menetapkan plafon global humanizer pada 8 pesan/menit dan 60 pesan/jam. Reservasi P0 tetap satu slot menit dan lima slot jam, sehingga P1/P2 mendapat 7 pesan/menit dan 55 pesan/jam. Kuota per chat pelanggan tetap 40 pesan/jam.
+- Menambahkan `calculateWindowWaitMs(trigger)` yang menghitung waktu sampai cukup slot menit dan jam tersedia, termasuk ketika jumlah pesan sudah melampaui plafon. Data outbound saat pemulihan guard dibaca berurutan berdasarkan `created_at`.
+- Route `waha/send` memakai `Math.max(calculateWindowWaitMs(trigger), 5000)`, bukan jeda tetap 4 detik.
+- Hanya error `WAHA_RATE_LIMIT_BLOCKED` pada trigger antrean yang menghasilkan 202. Kuota pelanggan diperiksa sebelum window global sehingga kuota pelanggan penuh tidak disamarkan menjadi penerimaan antrean.
+- Menambahkan opsi internal `bypassRateCheck` pada `HumanizeOptions`. Background memakai opsi ini untuk melewati pembatasan window global yang bisa kembali penuh saat menunggu. Validasi penerima, circuit breaker, dan kuota pelanggan tetap berlaku; payload HTTP tidak dapat mengaktifkan bypass.
+- Pengiriman background mempertahankan opsi awal, mencatat outbound ke `message_log`, dan mencatat log sukses, skip, atau gagal sesuai hasil aktual.
+- Mengganti pengujian 202 yang hanya memock error dengan regresi route memakai humanizer asli, clock terkendali, serta adaptor DB/WAHA terisolasi.
+
+### 2. Berkas yang Diperbarui
+- `dashboard/src/lib/waha/humanizer.ts`
+- `dashboard/src/app/api/internal/waha/send/route.ts`
+- `dashboard/tests/unit/waha-priority-guard.test.ts`
+- `dashboard/tests/unit/waha-humanizer.test.ts`
+- `dashboard/tests/unit/waha-queue-mute-bypass.test.ts`
+- `docs/RUNBOOK.md`
+- `updates.md`
+
+### 3. Commit Git
+- Tidak membuat commit pada pengerjaan ini.
+
+### 4. Migrasi dan Rollback
+- Tidak ada migrasi database, perubahan kredensial, atau perubahan konfigurasi WAHA.
+- Pemulihan kode harus mencakup humanizer, route pengiriman, pengujian batas window, dan dokumentasi operasional terkait.
+
+### 5. Bukti Verifikasi
+- Smoke melalui `cd dashboard && npx tsx -e` dengan route dan humanizer asli, clock terkendali, serta adaptor I/O in-memory: HTTP 202, jeda 59.001 ms, satu panggilan `/api/sendText`, dan satu catatan outbound. Window global sengaja diisi penuh lagi sebelum callback dijalankan.
+- `cd dashboard && npm test -- --run`: 52 berkas, 510 pengujian lulus. Regresi membuktikan batas 60/jam, perhitungan slot menit/jam, jeda minimal 5 detik, delivery background saat window kembali penuh, pencatatan outbound, serta penolakan bypass dari payload HTTP.
+- `cd dashboard && npm run test:integration`: 8 pengujian lulus.
+- `cd dashboard && npx tsc --noEmit && npm run lint`: exit code 0; tidak ada warning atau error ESLint.
+- Pemeriksaan R-02 pada source, pengujian, dan bagian runbook yang diubah: 0 karakter em dash.
+
+### 6. Known Issues / Catatan Operasional
+- Timer background berada di memori proses. Restart dashboard sebelum timer berjalan dapat membatalkan pengiriman; 202 bukan bukti pesan sudah diterima WhatsApp.
+- Bypass mengikuti kebijakan pengiriman tertunda yang diminta, sehingga tidak memblokir ulang window global jika ada trafik baru selama jeda. Proteksi lain tetap dapat menolak pengiriman dan kegagalannya dicatat; tidak menambahkan kebijakan retry baru.
+- Suite lulus masih mengeluarkan peringatan Vite CJS serta log skenario kegagalan/mock event, LLM, dan heartbeat yang sudah ada.
+- Smoke tidak memakai database produksi atau WhatsApp fisik. Container belum dibangun ulang.
+
+## [2026-11-06] Konteks Pertanyaan Awal pada Alert Handover Minri
+
+### 1. Ringkasan Pekerjaan
+- Saat pesan pertama diproses pada state `INIT`, route menyimpan teks yang sudah di-trim ke `metadata.initial_inquiry`.
+- Jika percakapan masih menunggu pilihan dan pelanggan mengirim teks substantif lebih dari 10 karakter, konteks awal diperbarui tanpa menghilangkan `current_router_id` atau metadata lainnya.
+- Alert Owner Utama untuk cabang Tanya CS dan handover 3-strike kini memakai format Minri yang konsisten dan menampilkan `initial_inquiry`, bukan digit menu terakhir.
+- Jika metadata belum memiliki pertanyaan substantif, route mencoba mencari pesan inbound non-menu terakhir dari `message_log`; bila tidak tersedia, konteks yang tersimpan atau pesan saat ini menjadi fallback.
+- Engine meneruskan `initialInquiry` pada action transisi INIT dan saat teks substantif menggantikan sapaan pendek.
+
+### 2. Berkas yang Diperbarui
+- `dashboard/src/app/api/internal/customer/handle/route.ts`
+- `dashboard/src/lib/pipeline/engine.ts`
+- `dashboard/src/lib/customer/templates.ts`
+- `dashboard/tests/unit/handover-alert-context.test.ts`
+- `dashboard/tests/unit/customer-handle.test.ts`
+- `dashboard/tests/unit/pipeline-retry-limit.test.ts`
+- `updates.md`
+
+### 3. Commit Git
+- Tidak membuat commit pada pengerjaan ini.
+
+### 4. Migrasi dan Rollback
+- Tidak ada migrasi skema database.
+- Pemulihan kode mencakup route, engine, template alert, dan regresi unit yang terkait.
+
+### 5. Bukti Verifikasi
+- `cd dashboard && npx vitest run tests/unit/handover-alert-context.test.ts`: 4 tes lulus. Meliputi rekaman pesan INIT, penggantian sapaan singkat, alert Tanya CS, dan alert handover 3-strike.
+- `cd dashboard && npm test -- --run`: 53 berkas, 514 tes lulus.
+- `cd dashboard && npx tsc --noEmit && npm run lint`: lulus; ESLint melaporkan 0 warning dan 0 error.
+- Pemeriksaan baris tambahan dari `git diff HEAD`: hasil kosong sesuai aturan R-02.
+
+### 6. Known Issues / Catatan Operasional
+- Belum menguji pengiriman notifikasi pada WhatsApp fisik. Tes menjalankan route dengan adaptor Prisma terisolasi.
+- Jika `initial_inquiry` bukan substantif dan tidak ada pesan inbound non-menu yang dapat dibaca, alert menggunakan nilai tersimpan atau pesan saat ini.
 
